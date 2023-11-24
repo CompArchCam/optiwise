@@ -25,6 +25,8 @@ fi
 subdirs="lib* bin* ext/lib* ext/bin*"
 cd "$src"
 
+cp License.txt $dst/License.txt
+
 # Create all subdirectories of lib{32,64}; bin{32,64} and the ext versions of
 # these in the destination.
 find $subdirs -type d \
