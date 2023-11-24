@@ -1,0 +1,140 @@
+#!/bin/sh -u
+#
+# Script to run execution counting on a given application via DynamoRIO.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+share_dir="$(realpath "$share_bin_dir/..")"
+share_dynamorio_dir="$share_dir/dynamorio"
+result_dir=optiwise_result
+frequency=1000
+dynamorio_opts=0
+name=result
+stack_size=2048
+
+# A note on parsing strategy: we move any --dynamorio-opt options to the end of
+# the argument list, noting how many there are in $dynamorio_opts. Then we
+# rotate these back to the beginning position.
+while [ $dynamorio_opts -lt $# ]; do
+  case "$1" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise count [<options>] [--] <program> [<arguments>]
+Runs a program and counts the execution of its instructions and control flow
+edges using DynamoRIO.
+
+The result of execution count run will be put in <result-dir>/count/<name>,
+which defaults to '$result_dir/count/$name.txt' Other optiwise commands refer to
+the execution count run using its filename (not the path).
+
+Options:
+  -h, --help    Display this help.
+  -v, --verbose Be more verbose in operation.
+  -d, --result-dir
+                Override the result directory (default: $result_dir).
+  -n, --name    Specifies a name for output of this execution count run. Should be a
+                valid filename (not a path) (default: $name).
+  --name-count  Specifies the raw filename for the output (default \$name.txt)
+  -i, --stdin   Redirect stdin for the executed program to be the specified file.
+  -o, --stdout  Redirect stdout for the executed program to be the specified file.
+  -e, --stderr  Redirect stderr for the executed program to be the specified file.
+  --stack-size  Override maximum number of in-flight calls tracked
+                (default: $stack_size).
+  -p, --dynamorio-opt=<option>
+                Pass option(s) to DynamoRIO's 'drrun' directly. Can be specified
+                multiple times.
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -d|--result-dir) shift; result_dir="$1";;
+    --result-dir=*) result_dir="${1#--*=}";;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    --name-count) shift; name_count="$1";;
+    --name-count=*) name_count="${1#--*=}";;
+    -i|--stdin) shift; stdin="$1";;
+    --stdin=*) stdin="${1#--*=}";;
+    -o|--stdout) shift; stdout="$1";;
+    --stdout=*) stdout="${1#--*=}";;
+    -e|--stderr) shift; stderr="$1";;
+    --stderr=*) stderr="${1#--*=}";;
+    --stack-size) shift; stack_size="$1";;
+    --stack-size=*) stack_size="${1#--*=}";;
+    -p|--dynamorio-opt)
+      dynamorio_opts=$(($dynamorio_opts+1))
+      shift
+      set -- "$@" "$1"
+      ;;
+    --dynamorio-opt=*)
+      dynamorio_opts=$(($dynamorio_opts+1))
+      set -- "$@" "${1#--*=}"
+      ;;
+    --) shift; break;;
+    -[^-]?*)
+      opt="$1"
+      shift
+      set -- "${opt%${opt#-?}}" "-${opt#-?}" "$@"
+      continue
+      ;;
+    --*|-?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ $dynamorio_opts -eq $# ]; then
+  cat >&2 <<EOF
+Error: no program specified to run execution count on.
+
+For example 'optiwise count /bin/echo "Hello, World!"' would run execution
+counting on the program /bin/echo with the argument "Hello, World!"'.
+
+See 'optiwise count --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_count-}" ]; then
+  name_count="$name.txt"
+fi
+
+set -- \
+  "-c" "$share_dir/lib/liboptiwise.so" "$result_dir/count/$name_count" \
+  "$stack_size" "${stdout--}" "${stderr--}" \
+  "--" "$@"
+if [ $dynamorio_opts -gt 0 ]; then
+  # Rotate the dynamorio options to the begining
+  while [ $dynamorio_opts -lt $# ]; do
+    arg="$1"
+    shift
+    set -- "$@" "$arg"
+    dynamorio_opts=$(($dynamorio_opts+1))
+  done
+fi
+
+if [ ! -d "$result_dir" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir"
+  fi
+  mkdir -p "$result_dir" || exit $?
+fi
+if [ ! -d "$result_dir/count" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/count"
+  fi
+  mkdir -p "$result_dir/count" || exit $?
+fi
+
+if [ "${flag_verbose-}" ]; then
+  flag_verbose=-verbose
+  echo $share_dir/dynamorio/bin64/drrun ${flag_verbose-} "$@" \
+    '<' "${stdin-/dev/stdin}"
+fi
+exec $share_dir/dynamorio/bin64/drrun ${flag_verbose-} "$@" \
+    < "${stdin-/dev/stdin}"

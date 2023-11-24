@@ -1,0 +1,292 @@
+#!/bin/sh -u
+#
+# Script to disassemble a program and all of its dynamic depdencies.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+result_dir=optiwise_result
+objdump_opts=0
+objdump=objdump
+
+# A note on parsing strategy: we move any --objdump-opt options to the end of
+# the argument list, noting how many there are in $objdump_opts. Then we rotate
+# these back to the beginning position.
+while [ $objdump_opts -lt $# ]; do
+  case "$1" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise disassemble [<options>]
+Disassembles a previously sampled program and all its dynamic dependencies using
+'objdump -d'.
+
+The result of the disassemble will be put in <result-dir>/disassemble/<name>,
+which defaults to '$result_dir/disassemble/result.txt.gz'. Other optiwise commands refer
+to the disassembly using its filename (not the path).
+
+Options:
+  -h, --help    Display this help.
+  -v, --verbose Be more verbose in operation.
+  -d, --result-dir
+                Override the result directory (default: $result_dir).
+  -n, --name    Name of both output and input. Should be a valid filename (not a
+                path) (default: result).
+  --name-disassemble
+                Name of the raw disassemble output file (default: \$name.txt.gz).
+                If this name ends with '.gz' the result is compressed with 'gzip'
+  --name-sample Name of the sampling run to disassemble (default: most recent).
+  -E, --objdump Override the name of the 'objdump' utility.
+  -p, --objdump-opt=<option>
+                Pass option(s) to 'objdump' directly. Can be specified multiple
+                times.
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -d|--result-dir) shift; result_dir="$1";;
+    --result-dir=*) result_dir="${1#--*=}";;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    --name-sample) shift; name_sample="$1";;
+    --name-sample=*) name_sample="${1#--*=}";;
+    --name-disassemble) shift; name_disassemble="$1";;
+    --name-disassemble=*) name_disassemble="${1#--*=}";;
+    -E|--objdump) shift; objdump="$1";;
+    --objdump=*) objdump="${1#--*=}";;
+    -p|--objdump-opt)
+      objdump_opts=$(($objdump_opts+1))
+      shift
+      set -- "$@" "$1"
+      ;;
+    --objdump-opt=*)
+      objdump_opts=$(($objdump_opts+1))
+      set -- "$@" "${1#--*=}"
+      ;;
+    --) shift; break;;
+    -[^-]?*)
+      opt="$1"
+      shift
+      set -- "${opt%${opt#-?}}" "-${opt#-?}" "$@"
+      continue
+      ;;
+    --*|-?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ $objdump_opts -ne $# ]; then
+  cat >&2 <<EOF
+Error: Unnecessary positional arguments detected e.g. '$1'.
+
+'optiwise disassemble' does not take any positional arguments, such as the name
+of the program to disassemble. In other words, use 'optiwise disassemble' not
+'optiwise disassemble /bin/echo' or anything similar.
+
+See 'optiwise disassemble --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_sample-}" ]; then
+  if [ "${name-}" ]; then
+    name_sample="$name.perf.data"
+  elif [ -d "$result_dir" -a -d "$result_dir/sample" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/sample/"*; do
+      if [ -f "$f" ]; then
+        if
+          [ ! "${name_sample-}" ] || \
+          [ "$f" -nt "$result_dir/sample/$name_sample" ]
+        then
+          name_sample="${f#"$result_dir/sample/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/sample/${name_sample-}" ]; then
+      cat >&2 <<EOF
+Error: No sampling runs found in result directory: '$result_dir/sample'.
+
+Have you run 'optiwise sample' yet? The disassembly requires sampling first as
+it uses the sample data to determine all dynamically loaded libraries.
+
+See 'optiwise disassemble --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+
+if [ ! -f "$result_dir/sample/$name_sample" ]; then
+  cat >&2 <<EOF
+Error: File does not exist: '$result_dir/sample/$name_sample'.
+
+Did you mistype '$name_sample'?
+EOF
+  exit 1
+fi
+
+if [ ! -d "$result_dir/disassemble" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/disassemble"
+  fi
+  mkdir -p "$result_dir/disassemble" || exit $?
+fi
+
+if [ ! "${name_disassemble-}" ]; then
+  if [ "${name-}" ]; then
+    name_disassemble="$name.txt.gz"
+  else
+    name_disassemble="result.txt.gz"
+  fi
+fi
+
+perf_data="$result_dir/sample/$name_sample"
+objdump_result="$(realpath "$result_dir/disassemble/$name_disassemble" )"
+buildid_dir="$(realpath "$result_dir/binaries")"
+
+# Get a list of executables for which we do have a buildid
+if [ "${flag_verbose-}" ]; then
+  echo perf --buildid-dir "$buildid_dir" \
+    buildid-list -i "$perf_data"
+fi
+with_buildid=$( \
+  perf --buildid-dir "$buildid_dir" \
+    buildid-list -i "$perf_data" \
+  | sort | uniq \
+)
+
+if [ "${flag_verbose-}" ]; then
+  echo truncate -s 0 "$objdump_result"
+fi
+truncate -s 0 "$objdump_result"
+
+if [ "${name_disassemble##*.}" = "gz" ]; then
+  gzip="gzip"
+else
+  gzip="cat"
+fi
+
+# Find all ELFs with build ids.
+IFS="$(printf "\n\b")"
+for line in $with_buildid; do
+  IFS="$(printf " \t\n\b")"
+  file="${line#* }"
+  buildid="${line%% *}"
+  buildid="${buildid%??????????????????????????????????????}/${buildid#??}"
+
+  # Workaround for some mismatch between where perf and objdump put debug
+  # information. We create a symlink like
+  # optiwise_result/binaries/.build-id/b6/7648e0ab1...7b250b9e1d3.debug
+  # -> optiwise_result/binaries/.build-id/b6/7648e0ab1...7b250b9e1d3/debug
+  # and then run objdump in the optiwise_result/binaries/.build-id/b6 directory
+  # so that it  finds that symlink.
+  if
+    [ -f "$buildid_dir/.build-id/$buildid/debug" ] &&
+    [ ! -f "$buildid_dir/.build-id/$buildid.debug" ]
+  then
+    if [ "${flag_verbose-}" ]; then
+      echo cd "$buildid_dir/.build-id" \; \
+        ln -s -T ${buildid##*/}/debug $buildid.debug
+    fi
+    (
+      cd "$buildid_dir/.build-id"
+      ln -s -T "${buildid##*/}/debug" "$buildid.debug"
+    )
+  fi
+
+  if [ "$file" = "[kernel.kallsyms]" ]; then
+    # TODO support for kernel debugging
+    continue
+  elif [ "$file" = "[vdso]" ]; then
+    elf="$buildid_dir/.build-id/$buildid/vdso"
+  else
+    elf="$buildid_dir"/.build-id/$buildid/elf
+  fi
+
+  if [ ! -f "$elf" -a -f "$file" ]; then
+    printf "Warning: fallback from %s to %s.\n" "$elf" "$file" 1>&2
+    any_warning=1
+    elf="$file"
+  fi
+
+  if [ ! -f "$elf" ]; then
+    printf "Warning: %s not found at %s.\n" "$file" "$elf" 1>&2
+    any_warning=1
+  else
+    (
+      elf=$(realpath "$elf")
+      debug_dir=$(dirname "$buildid_dir/.build-id/$buildid.debug")
+
+      # Workaround objdump bug where Dynamic Symbol table cannot be dumped.
+      flag_wk=-WK
+      if [ -d "$debug_dir" ]; then cd "$debug_dir"; fi
+      if ! "$objdump" -T -WK "$@" "$elf" 2> /dev/null 1> /dev/null; then
+        unset flag_wk
+      fi
+
+      if [ "${flag_verbose-}" ]; then
+        if [ -d "$debug_dir" ]; then echo cd "$debug_dir"; fi
+        echo "$objdump" -p -t -T -d ${flag_wk-} -l --no-show-raw-insn "$@" "$elf" \
+           '|' "$gzip" ">>" "$objdump_result"
+      fi
+      "$objdump" -p -t -T -d ${flag_wk-} -l --no-show-raw-insn "$@" "$elf" \
+        | sed -e '/^ /!{/file format/{/debug:/!s.*FILE '$file'}}' \
+        | $gzip >> "$objdump_result"
+    )
+    true
+  fi
+done
+
+# Find all memory mapped ELFs for which we don't have a Build ID
+if [ "${flag_verbose-}" ]; then
+  echo perf --buildid-dir "$buildid_dir" \
+    script --show-mmap-events -i "$perf_data" -F comm
+fi
+for elf in $(\
+  perf --buildid-dir "$buildid_dir" \
+    script --show-mmap-events -i "$perf_data" -F comm \
+  | sed -n -e '/optiwise_redir/d;/PERF_RECORD_MMAP2/s#.*: r-xp ##p' \
+  | sort | uniq
+); do
+  unset has_buildid
+  IFS="$(printf "\n\b")"
+  for line in $with_buildid; do
+    IFS="$(printf " \t\n\b")"
+    if [ "${line#* }" = "$elf" ]; then
+      has_buildid=1
+      break
+    fi
+  done
+
+  if [ "${has_buildid-}" ]; then
+    continue
+  fi
+
+  if [ "$elf" = "[kernel.kallsyms]" ]; then
+    # TODO support for kernel debugging
+    continue
+  elif [ "$elf" = "[vdso]" ]; then
+    # TODO dump vdso if perf didn't?
+    continue
+  fi
+
+  if [ ! -f "$elf" ]; then
+    printf "Warning: %s not found.\n" "$elf" 1>&2
+    any_warning=1
+  else
+    elf="$(realpath "$elf")"
+
+    if [ "${flag_verbose-}" ]; then
+      echo "$objdump" -p -t -T -d -l --no-show-raw-insn "$@" "$elf" \
+        '|' "$gzip" ">>" "$objdump_result"
+    fi
+    "$objdump" -p -t -T -d -l --no-show-raw-insn "$@" "$elf" \
+      | sed -e '/^ /!{/file format/s.*FILE '"$elf"'}' \
+      | $gzip >> "$objdump_result"
+  fi
+done

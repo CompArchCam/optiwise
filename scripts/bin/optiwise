@@ -1,0 +1,128 @@
+#!/bin/sh -u
+#
+# This is the root 'optiwise' command, that will be invoked with subcommands
+# e.g. 'optiwise sample <arguments>'. This script invokes an appopriate
+# subcommand script e.g. 'optiwise-sample <arguments>' which handles the
+# specific verb used.
+
+script_name=$(basename $0)
+# This is automatically replaced with the git tag version in installations.
+# Hence, this default version will only display if that fails.
+version=v0.9.0-unamed-development-version
+
+# Directory of this script.
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+share_bin_dir=$(realpath "$bin_dir/../share/optiwise/bin")
+result_dir=optiwise_result
+
+if [ $# -lt 1 ]; then
+  # We ran with no arguments.
+  do_cmd=help
+else
+  # Parse arguments
+  while :; do
+    case "${1-}" in
+      -h|--help)
+        do_cmd=help
+        flag_help=$1
+        ;;
+      -v|--version) do_cmd=version;;
+      -d|--result-dir)
+        shift
+        result_dir=$1
+        ;;
+      --result-dir=*)
+        result_dir=${1#--*=}
+        ;;
+      -?*)
+        cat >&2 <<EOF
+Unrecognized option '$1'
+Did you put an argument before the command?
+Try '$script_name help'
+EOF
+        exit 1
+        ;;
+      *) break;;
+    esac
+
+    shift
+  done
+fi
+
+# Try to invoke the actual command.
+case "${1-}" in
+  help)
+    if [ "${2-}" ]; then
+      if [ -f "$share_bin_dir/optiwise-$2" ]; then
+        exec "$share_bin_dir/optiwise-$2" --help
+      else
+        cat >&2 <<EOF
+Unrecognized command '$2'
+Did you put an argument before the command?
+Try '$script_name help'
+EOF
+        exit 1
+      fi
+    fi
+    do_cmd=help
+    ;;
+  version) do_cmd=version;;
+  "") if ! [ "${do_cmd-}" ]; then do_cmd=help; fi;;
+  *)
+    if [ -f "$share_bin_dir/optiwise-$1" ]; then
+      if [ "${flag_help-}" ]; then
+        exec "$share_bin_dir/optiwise-$1" --help
+      else
+        program="$1"
+        shift
+        exec "$share_bin_dir/optiwise-$program" "--result-dir=$result_dir" "$@"
+      fi
+    else
+      cat >&2 <<EOF
+Unrecognized command '$1'
+Did you put an argument before the command?
+Try '$script_name help'
+EOF
+        exit 1
+    fi
+    ;;
+esac
+
+# If we get here, it's a command that this script should handle natively.
+case "$do_cmd" in
+  version) printf "$script_name version $version\n" ;;
+  help|*)
+    cat <<EOF
+Usage: $script_name [<options>] <command> [<arguments>]
+Profiling tool combining execution counts and sampling.
+
+Supported commands:
+  help         Displays help on a command.
+  run          All-in-one profiling command. Roughly equivalent to 'check' then
+               'sample' then 'disassemble' then 'count' then 'analyze'.
+               A good starting point for beginners.
+  check        Checks for many possible problems with profiling.
+  version      Displays version number.
+  sample       Sample a program's execution.
+  disassemble  Disassemble a program and all dependencies.
+  count        Obtain execution count for program's execution.
+  analyze      Analyze and combine output of 'sample', 'disassemble', and
+               'count'.
+
+By default results and temporary files will go in the 'optiwise_result'
+directory within the working directory.  The output of each subcommand generally
+goes in a subfolder of the same name (e.g. 'optiwise_result/sample').  All
+commands which generate or take results have a '--name' option which allows
+naming of the output within this subfolder, and thus preserving multiple runs,
+or parallelising the process.
+
+Options:
+  -h, --help    Display this help.
+  -v, --version Display version and exit.
+  -d, --result-dir=<directory>
+                Override the result directory.
+EOF
+    ;;
+esac
+
+exit 0

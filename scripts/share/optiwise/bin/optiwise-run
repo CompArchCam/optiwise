@@ -1,0 +1,134 @@
+#!/bin/sh -u
+#
+# Script to run profiling on a given application via perf.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+result_dir=optiwise_result
+name=result
+
+while :; do
+  case "${1-}" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise run [<options>] [--] <program> [<arguments>]
+All-in-one profiling command. Roughly equivalent to 'optitwise check' then
+'optiwise sample' then 'optiwise disassemble' then 'optiwise count' then
+'optiwise analyze'. A good starting point for beginners.
+
+Some options to specific commands cannot be passed in this form, if more fine
+control is needed then run the commands individually.
+
+Options:
+  -h, --help    Display this help.
+  -v, --verbose Be more verbose in operation.
+  -d, --result-dir
+                Override the result directory (default: $result_dir).
+  -n, --name    Specifies a name for output of this sampling run. Should be a
+                valid filename (not a path) (default: $name).
+  -f, --frequency
+                Sets sampling frequency to specified value in Hz.
+  -E, --objdump Override the name of the 'objdump' utility.
+  -i, --stdin   Redirect stdin for the profiled program to be the specified file.
+  -o, --stdout  Redirect stdout for the profiled program to be the specified file.
+  -e, --stderr  Redirect stderr for the profiled program to be the specified file.
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -d|--result-dir) shift; result_dir="$1";;
+    --result-dir=*) result_dir="${1#--*=}";;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    -f|--frequency) shift; frequency="--frequency=$1";;
+    --frequency=*) frequency="--frequency=${1#--*=}";;
+    -E|--objdump) shift; objdump="--objdump=$1";;
+    --objdump=*) objdump="--objdump=${1#--*=}";;
+    -i|--stdin) shift; stdin="--stdin=$1";;
+    --stdin=*) stdin="--stdin=${1#--*=}";;
+    -o|--stdout) shift; stdout="--stdout=$1";;
+    --stdout=*) stdout="--stdout=${1#--*=}";;
+    -e|--stderr) shift; stderr="--stderr=$1";;
+    --stderr=*) stderr="--stderr=${1#--*=}";;
+    --) shift; break;;
+    -[^-]?*)
+      opt="$1"
+      shift
+      set -- "${opt%${opt#-?}}" "-${opt#-?}" "$@"
+      continue
+      ;;
+    --*|-?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ $# -lt 1 ]; then
+  cat >&2 <<EOF
+Error: no program specified to profile.
+
+For example 'optiwise run /bin/echo "Hello, World!"' would profile the program
+/bin/echo with the argument "Hello, World!"'.
+
+See 'optiwise run --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! -d "$result_dir" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir"
+  fi
+  mkdir -p "$result_dir" || exit $?
+fi
+
+if [ "${flag_verbose-}" ]; then
+  echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} -- "$@"
+fi
+
+"$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} -- "$@" || exit $?
+
+if [ "${flag_verbose-}" ]; then
+  echo "$share_bin_dir/optiwise-sample" \
+    ${flag_verbose-} --name="$name" \
+    ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
+    -- "$@"
+fi
+
+"$share_bin_dir/optiwise-sample" \
+  ${flag_verbose-} --name="$name" \
+  ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
+  -- "$@" || exit $?
+
+if [ "${flag_verbose-}" ]; then
+  echo "$share_bin_dir/optiwise-disassemble" \
+    ${flag_verbose-} ${objdump-} --name="$name"
+fi
+
+"$share_bin_dir/optiwise-disassemble" \
+  ${flag_verbose-} ${objdump-} --name="$name" || exit $?
+
+if [ "${flag_verbose-}" ]; then
+  echo "$share_bin_dir/optiwise-count" \
+    ${flag_verbose-} --name="$name" \
+    ${stdin-} ${stdout-} ${stderr-} \
+    -- "$@"
+fi
+
+"$share_bin_dir/optiwise-count" \
+  ${flag_verbose-} --name="$name" \
+  ${stdin-} ${stdout-} ${stderr-} \
+  -- "$@" || exit $?
+
+if [ "${flag_verbose-}" ]; then
+  echo "$share_bin_dir/optiwise-analyze" \
+    ${flag_verbose-} --name="$name"
+fi
+
+exec "$share_bin_dir/optiwise-analyze" \
+  ${flag_verbose-} --name="$name"

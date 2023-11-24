@@ -1,0 +1,258 @@
+#!/bin/sh -u
+#
+# Script to analyze and combine the output of sampling and execution counting.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+share_dir="$(realpath "$share_bin_dir/..")"
+result_dir=optiwise_result
+
+while :; do
+  case "${1-}" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise analyze [<options>]
+Analyze and combine output of 'sample', 'disassemble', and 'count'.
+
+Options:
+  -h, --help   Display this help.
+  -v, --verbose
+               Be more verbose in operation.
+  -q, --quiet  Don't print anything if there are no problems.
+   --no-quiet
+  -d, --result-dir=<directory>
+               Override the result directory.
+  -n, --name   Sets all of the --name-* variables. Can be used to easily store
+               many separate profiling runs.
+  --name-analyze
+               Name of the output directory. Should be a valid filename (not a
+               path) (default: result).
+  --name-sample
+               Name of the sampling run to analyze (default: most recent).
+  --name-count Name of the execution counting run to analyze (default: most
+               recent).
+  --name-disassemble
+               Name of the disassemble run to analyze (default: most recent).
+  --no-parallel
+               Forces analysis to use only one core. Default is all available
+               cores.
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -q|--quiet) flag_quiet="$1";;
+    --no-quiet) unset flag_quiet;;
+    -d|--result-dir) shift; result_dir=$1;;
+    --result-dir=*) result_dir=${1#--*=};;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    --name-analyze) shift; name_analyze="$1";;
+    --name-analyze=*) name_analyze="${1#--*=}";;
+    --name-sample) shift; name_sample="$1";;
+    --name-sample=*) name_sample="${1#--*=}";;
+    --name-count) shift; name_count="$1";;
+    --name-count=*) name_count="${1#--*=}";;
+    --name-disassemble) shift; name_disassemble="$1";;
+    --name-disassemble=*) name_disassemble="${1#--*=}";;
+    --no-parallel) flag_no_parallel="$1";;
+    --parallel) unset flag_no_parallel;;
+    --) shift; break;;
+    -?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ "${1-}" ]; then
+  cat >&2 <<EOF
+Error: Unnecessary positional arguments detected e.g. '$1'.
+
+'optiwise analyze' does not take any positional arguments, such as the name
+of the program to disassemble. In other words, use 'optiwise analyze' not
+'optiwise analyze /bin/echo' or anything similar.
+
+See 'optiwise analyze --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_sample-}" ]; then
+  if [ "${name-}" ]; then
+    name_sample="$name.perf.data"
+  elif [ -d "$result_dir" -a -d "$result_dir/sample" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/sample/"*; do
+      if [ -f "$f" ]; then
+        if
+          [ ! "${name_sample-}" ] || \
+          [ "$f" -nt "$result_dir/sample/$name_sample" ]
+        then
+          name_sample="${f#"$result_dir/sample/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/sample/${name_sample-}" ]; then
+      cat >&2 <<EOF
+Error: No sampling runs found in result directory: '$result_dir/sample'.
+
+Have you run 'optiwise sample' yet? The analysis requires sampling first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+if [ ! -f "$result_dir/sample/$name_sample" ]; then
+  cat >&2 <<EOF
+Error: Sampling run not found: '$result_dir/sample/$name_sample'.
+
+Have you run 'optiwise sample' yet? The analysis requires sampling first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_count-}" ]; then
+  if [ "${name-}" ]; then
+    name_count="$name.txt"
+  elif [ -d "$result_dir" -a -d "$result_dir/count" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/count/"*; do
+      if [ -f "$f" ]; then
+        if
+          [ ! "${name_count-}" ] || \
+          [ "$f" -nt "$result_dir/count/$name_count" ]
+        then
+          name_count="${f#"$result_dir/count/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/count/${name_count-}" ]; then
+      cat >&2 <<EOF
+Error: No execution count runs found in result directory: '$result_dir/count'.
+
+Have you run 'optiwise count' yet? The analysis requires an execution count
+first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+if [ ! -f "$result_dir/count/$name_count" ]; then
+  cat >&2 <<EOF
+Error: Execution count run not found: '$result_dir/count/$name_count'.
+
+Have you run 'optiwise count' yet? The analysis requires sampling first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_disassemble-}" ]; then
+  if [ "${name-}" ]; then
+    name_disassemble="$name.txt.gz"
+  elif [ -d "$result_dir" -a -d "$result_dir/disassemble" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/disassemble/"*; do
+      if [ -f "$f" ]; then
+        if
+          [ ! "${name_disassemble-}" ] || \
+          [ "$f" -nt "$result_dir/disassemble/$name_disassemble" ]
+        then
+          name_disassemble="${f#"$result_dir/disassemble/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/disassemble/${name_disassemble-}" ]; then
+      cat >&2 <<EOF
+Error: No diassembly found in result directory: '$result_dir/disassemble'.
+
+Have you run 'optiwise disassemble' yet? The analysis requires disassembly
+first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+if [ ! -f "$result_dir/disassemble/${name_disassemble-}" ]; then
+  cat >&2 <<EOF
+Error: Diassembly not found in result directory: '$result_dir/disassemble/${name_disassemble-}'.
+
+Have you run 'optiwise disassemble' yet? The analysis requires disassembly
+first.
+
+See 'optiwise analyze --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_analyze-}" ]; then
+  if [ "${name-}" ]; then
+    name_analyze="$name"
+  else
+    name_analyze=result
+  fi
+fi
+
+if [ ! -d "$result_dir/analyze" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/analyze"
+  fi
+  mkdir -p "$result_dir/analyze" || exit $?
+fi
+if [ ! -d "$result_dir/analyze/$name_analyze" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/analyze/$name_analyze"
+  fi
+  mkdir -p "$result_dir/analyze/$name_analyze" || exit $?
+fi
+
+if [ "${name_disassemble##*.}" = "gz" ]; then
+  zcat="zcat"
+else
+  zcat="cat"
+fi
+
+if [ "${flag_no_parallel-}" ]; then
+  analyzer="$share_bin_dir/analyzer-serial"
+else
+  analyzer="$share_bin_dir/analyzer"
+fi
+
+if [ "${flag_verbose-}" ]; then
+  echo perf script \
+  -i "$result_dir/sample/$name_sample" -D --show-mmap-events --no-inline \
+  -F time,event,period,ip,dso \
+  '|' "$analyzer" \
+    "/dev/stdin" \
+    "/dev/fd/4" \
+    "$result_dir/count/$name_count" \
+    "$result_dir/analyze/$name_analyze/inst.csv" \
+    "$result_dir/analyze/$name_analyze/loop.csv" \
+    "$result_dir/analyze/$name_analyze/structure.txt" \
+  '4<('$zcat "$result_dir/disassemble/$name_disassemble"')'
+fi
+perf script \
+  -i "$result_dir/sample/$name_sample" -D --show-mmap-events --no-inline \
+  -F time,event,period,ip,dso \
+| exec "$analyzer" \
+  "/dev/stdin" \
+  "/dev/fd/4" \
+  "$result_dir/count/$name_count" \
+  "$result_dir/analyze/$name_analyze/inst.csv" \
+  "$result_dir/analyze/$name_analyze/loop.csv" \
+  "$result_dir/analyze/$name_analyze/structure.txt" 4<<EOF
+$($zcat "$result_dir/disassemble/$name_disassemble")
+EOF

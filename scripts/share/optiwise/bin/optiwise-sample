@@ -1,0 +1,168 @@
+#!/bin/sh -u
+#
+# Script to run profiling on a given application via perf.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+result_dir=optiwise_result
+frequency=1000
+perf_opts=0
+name=result
+
+# A note on parsing strategy: we move any --perf-opt options to the end of the
+# argument list, noting how many there are in $perf_opts. Then we rotate these
+# back to the beginning position.
+while [ $perf_opts -lt $# ]; do
+  case "$1" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise sample [<options>] [--] <program> [<arguments>]
+Runs a program and samples its execution to obtain profile information using
+'perf record'.
+
+The result of sampling will be put in <result-dir>/sample/<name>, which defaults
+to '$result_dir/sample/$name'. Other optiwise commands refer to the sampling run
+using its filename (not the path).
+
+Options:
+  -h, --help    Display this help.
+  -v, --verbose Be more verbose in operation.
+  -d, --result-dir
+                Override the result directory (default: $result_dir).
+  -n, --name    Specifies a  name for output of this sampling run. Should be a
+                valid filename (not a path) (default: $name).
+  --name-sample Name of the raw output file of this run (default:
+                \$name.perf.data).
+  -f, --frequency
+                Sets sampling frequency to specified value in Hz.
+  -i, --stdin   Redirect stdin for the sampled program to be the specified file.
+  -o, --stdout  Redirect stdout for the sampled program to be the specified file.
+  -e, --stderr  Redirect stderr for the sampled program to be the specified file.
+  -p, --perf-opt=<option>
+                Pass option(s) to 'perf record' directly. Can be specified
+                multiple times.
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -d|--result-dir) shift; result_dir="$1";;
+    --result-dir=*) result_dir="${1#--*=}";;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    --name-sample) shift; name_sample="$1";;
+    --name-sample=*) name_sample="${1#--*=}";;
+    -f|--frequency) shift; frequency="$1";;
+    --frequency=*) frequency="${1#--*=}";;
+    -i|--stdin) shift; stdin="$1";;
+    --stdin=*) stdin="${1#--*=}";;
+    -o|--stdout) shift; stdout="$1";;
+    --stdout=*) stdout="${1#--*=}";;
+    -e|--stderr) shift; stderr="$1";;
+    --stderr=*) stderr="${1#--*=}";;
+    -p|--perf-opt)
+      perf_opts=$(($perf_opts+1))
+      shift
+      set -- "$@" "$1"
+      ;;
+    --perf-opt=*)
+      perf_opts=$(($perf_opts+1))
+      set -- "$@" "${1#--*=}"
+      ;;
+    --) shift; break;;
+    -[^-]?*)
+      opt="$1"
+      shift
+      set -- "${opt%${opt#-?}}" "-${opt#-?}" "$@"
+      continue
+      ;;
+    --*|-?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ $perf_opts -eq $# ]; then
+  cat >&2 <<EOF
+Error: no program specified to sample.
+
+For example 'optiwise sample /bin/echo "Hello, World!"' would sample the program
+/bin/echo with the argument "Hello, World!"'.
+
+See 'optiwise sample --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ -n "${stdin-}" -o -n "${stdout-}" -o -n "${stderr-}" ]; then
+  set -- "--" \
+    "$share_bin_dir/optiwise_redirect.sh" \
+    "${stdin-/dev/stdin}" \
+    "${stdout-/dev/stdout}" \
+    "${stderr-/dev/stderr}" \
+    "$@"
+else
+  set -- "--" "$@"
+fi
+if [ $perf_opts -gt 0 ]; then
+  # Rotate the perf options to the begining
+  while [ $perf_opts -lt $# ]; do
+    arg="$1"
+    shift
+    set -- "$@" "$arg"
+    perf_opts=$(($perf_opts+1))
+  done
+fi
+
+if [ ! -d "$result_dir" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir"
+  fi
+  mkdir -p "$result_dir" || exit $?
+fi
+if [ ! -d "$result_dir/sample" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/sample"
+  fi
+  mkdir -p "$result_dir/sample" || exit $?
+fi
+buildid_dir="$(realpath "$result_dir/binaries")"
+if [ ! -d "$buildid_dir" ]; then
+  # Security: We create the buildid_dir with 700 permissions by default as perf
+  # automatically copies all binaries it sees into that directory, and we
+  # wouldn't want to inadvertedly leak something by lowering its permissions.
+  um=$(umask)
+  umask 0077
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$buildid_dir"
+  fi
+  mkdir -p "$buildid_dir" || exit $?
+  umask "$um"
+fi
+
+if [ ! "${name_sample-}" ]; then
+  name_sample="$name.perf.data"
+fi
+
+if [ "${flag_verbose-}" ]; then
+  echo perf --buildid-dir "$(realpath "$result_dir/binaries")" record \
+    ${flag_verbose-} \
+    -o "$result_dir/sample/$name_sample" \
+    -g -i \
+    -e 'cpu-cycles:uP' \
+    -F "$frequency" \
+    --buildid-all \
+    "$@"
+fi
+exec perf --buildid-dir "$(realpath "$result_dir/binaries")" record \
+  ${flag_verbose-} \
+  -o "$result_dir/sample/$name_sample" \
+  -g -i \
+  -e 'cpu-cycles:uP' \
+  -F "$frequency" \
+  --buildid-all \
+  "$@"

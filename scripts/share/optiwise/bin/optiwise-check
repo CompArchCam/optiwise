@@ -1,0 +1,437 @@
+#!/bin/sh -u
+#
+# Script to check as many possible problems that profiling could face and
+# diagnose them for the user.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+share_dir="$(realpath "$share_bin_dir/..")"
+dynamorio_dir="$share_dir/dynamorio"
+result_dir=optiwise_result
+objdump=objdump
+
+while :; do
+  case "${1-}" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise check [<options>] [--] <program> [<arguments>]
+       optiwise check [<options>]
+Checks for many possible problems with profiling.
+
+If <program> is specified this script checks for problems with profiling that
+program in particular, otherwise it performs general checks. The <arguments> are
+after the program name are ignored for convenience.
+
+Options:
+  -h, --help   Display this help.
+  -q, --quiet  Don't print anything if there are no problems.
+   --no-quiet
+  -d, --result-dir=<directory>
+               Override the result directory.
+  -E, --objdump Override the name of the 'objdump' utility.
+EOF
+      exit 0
+      ;;
+    -q|--quiet) flag_quiet="$1";;
+    --no-quiet) unset flag_quiet;;
+    -v|--verbose) unset flag_quiet;;
+    -d|--result-dir) shift; result_dir=$1;;
+    --result-dir=*) result_dir=${1#--*=};;
+    -E|--objdump) shift; objdump="$1";;
+    --objdump=*) objdump="${1#--*=}";;
+    --) shift; break;;
+    -?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+# Checks for perf
+if ! which perf > /dev/null 2> /dev/null; then
+  # Perf not installed.
+  if grep -q -s "[Ud]buntu" /etc/os-release; then
+    perf_install_suggest=", perhaps via 'sudo apt install linux-tools-common'"
+  elif grep -q -s "[Dd]ebian" /etc/os-release; then
+    perf_install_suggest=", perhaps via 'sudo apt install linux-perf'"
+  else
+    perf_install_suggest=" from your package manager"
+  fi
+  cat >&2 <<EOF
+Error: 'perf' was not found.
+       Please install it$perf_install_suggest
+EOF
+  any_error=1
+else
+  # Perf is installed.
+  perf_kernel_version="$(perf --version | sed -ne 's/^perf version \([0-9]*\.[0-9]*\).*/\1/p')"
+  kernel_version="$(uname -r | sed -ne 's/^\([0-9]*\.[0-9]*\).*/\1/p')"
+  if [ "$(id -u)" -ne 0 -a "$(sysctl -n kernel.perf_event_paranoid)" -gt 2 ]; then
+    cat >&2 <<EOF
+Error: You may not have permission to sample on this system.
+         $(sysctl kernel.perf_event_paranoid)
+       This kernel setting means that users cannot profile at all.
+
+       To fix this try "sudo sysctl -w kernel.perf_event_paranoid=2" which will
+       allow profiling of user programs by non-root users. Alternatively, you
+       could do profiling as the root user. Note that either option has security
+       implications, so please think carefully!
+EOF
+    any_error=1
+  elif [ -n "$perf_kernel_version" -a -n "$kernel_version" -a "$perf_kernel_version" != "$kernel_version" ]; then
+    cat >&2 <<EOF
+Error: The installed version of perf does not match your kernel version.
+
+         perf version $perf_kernel_version != kernel version $kernel_version
+
+       This might happen for example if your system has recently updated perf,
+       but you've not restarted to update your kernel. Restarting your system
+       may help, or otherwise updating perf and/or the kernel to match.
+EOF
+    any_error=1
+  elif ! perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true > /dev/null 2> /dev/null; then
+    cat >&2 << EOF
+Error: perf record does not seem to work.
+
+       For example, running:
+         perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true
+       returns an error and prints:
+
+EOF
+    perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true > /dev/null
+    printf "\n\n" >&2
+    any_error=1
+  elif [ -z "${flag_quiet+1}" ]; then
+    if [ -n "$perf_kernel_version" ]; then
+      printf "Info: perf version %s installed and seems to work.\n" "$perf_kernel_version"
+    else
+      printf "Info: perf installed and seems to work.\n"
+    fi
+  fi
+fi
+
+# Check for dynamorio
+if [ ! -d "$dynamorio_dir" ]; then
+  cat >&2 <<EOF
+Error: 'DynamoRIO' was not found.
+       This is normally installed automatically as part of optiwise. On this
+       system we expected to find it at '$dynamorio_dir'. You can put a symlink
+       at that path pointing to a DynamoRIO installation to fix this, though it
+       may indicate a bigger problem.
+EOF
+  any_error=1
+elif [ ! -f "$dynamorio_dir/bin64/drrun" ]; then
+  cat >&2 <<EOF
+Error: 'DynamoRIO' installation appears broken.
+       DynamoRIO is normally installed automatically as part of optiwise. On
+       this system we expected to find it at '$dynamorio_dir'. You can put a
+       symlink at that path pointing to a DynamoRIO installation to fix this,
+       though it may indicate a bigger problem.
+EOF
+  any_error=1
+else
+  # I've included a timeout here because I've seen DynamoRIO silently hang
+  # when misconfigured, with only SIGKILL able to recover the situation.
+  if ! timeout -s KILL 5s "$dynamorio_dir/bin64/drrun" -c "$share_dir/lib/libexit0.so" -- false > /dev/null 2> /dev/null; then
+    dynamorio_error=$?
+    cat >&2 << EOF
+Error: DynamoRIO does not seem to work.
+
+       For example, running:
+         timeout -s KILL 5s "$dynamorio_dir/bin64/drrun" -c "$share_dir/lib/libexit0.so" -- false
+       returns an error and prints:
+
+EOF
+    timeout -s KILL 5s "$dynamorio_dir/bin64/drrun" -c "$share_dir/lib/libexit0.so" -- false > /dev/null
+    printf "\n\n" >&2
+    any_error=1
+  elif [ -z "${flag_quiet+1}" ]; then
+    dynamorio_version="$("$dynamorio_dir/bin64/drrun" -version | sed -ne 's/^.*version \([^ ]*\).*/\1/p')"
+    printf "Info: DynamoRIO version %s installed and seems to work.\n" "$dynamorio_version"
+  fi
+fi
+
+if [ -z "$(which "$objdump")" ]; then
+  if grep -q -s "[Dd]ebian" /etc/os-release; then
+    objdump_install_suggest=", perhaps via 'sudo apt install binutils'"
+  else
+    objdump_install_suggest=" from your package manager"
+  fi
+  cat >&2 <<EOF
+Error: objdump executable not found.
+
+       Try installing objdump$objdump_install_suggest.
+EOF
+  any_error=1
+else
+  objdump_version="$($objdump --version | sed -ne '1s/.*\([0-9]\+\.[0-9]\+\).*/\1/p')"
+  if [ $objdump_version  '<' 2.38 ]; then
+    cat >&2 <<EOF
+Warning: objdump version $objdump_version may cause issues due to Bug 28834.
+
+         You will probably see lots of warnings like:
+             DWARF error: section .debug_str is larger than its filesize!
+         when running 'optiwise disassemble' or 'optiwise run'.
+
+         This will prevent objdump using debug information, preventing optiwise
+         from assigning correct source code and function information to some
+         code.
+
+         You may wish to install a newer version of objdump (2.38 or later),
+         perhaps by compiling from source. The --objdump option can force the
+         use of a particular objdump binary.
+EOF
+    any_warning=1
+  fi
+fi
+
+if [ "${1-}" ]; then
+  if [ ! -f "$1" ]; then
+    if which "$1" > /dev/null 2>&1; then
+      program="$(which "$1")"
+      shift
+      set -- "$program" "$@"
+    fi
+  fi
+  if [ ! -f "$1" ]; then
+    printf "Error: program '%s' not found.\n" "$1" >&2
+    any_error=1
+  else
+    warning_no_buildid=0
+    warning_no_line=0
+    warning_no_symtab=0
+    warning_no_debuginfo=0
+    warning_no_unstrip=0
+
+    for library in $(
+      echo $1;
+      ldd $1 2>&1 | sed -e 's#not a dynamic executable#NADE#;/\<vdso\>/d;s#^[\t ]*##;s#^.*=> ##;s# (0x[0-9a-f]*)$##';
+    ); do
+      if [ "$library" = NADE ]; then
+        break
+      fi
+      library_path=$(realpath "$library")
+      library_debug="$library_path"
+      dwarf_flag=
+      library_filetype=$(file "$library_path")
+      is_stripped=0
+      buildid=1
+      debug_info=
+      case "$library_filetype" in
+        *ELF*BuildID*"not stripped"*)
+          ;;
+        *ELF*BuildID*)
+          is_stripped=1
+          ;;
+        *ELF*"not stripped"*)
+          buildid=0
+          ;;
+        *ELF*)
+          buildid=0
+          is_stripped=1
+          ;;
+        *)
+          printf "Warning: non-ELF library or executable cannot be validated '%s'\n" "$library" >&2
+          continue
+          ;;
+      esac
+
+      if [ $buildid -ne 0 ]; then
+        buildid=${library_filetype#*BuildID*=}
+        buildid=${buildid%%,*}
+      else
+        warning_no_buildid=1
+        NOPROBLEM=0
+        printf "Warning: no Build ID in '%s'\n" "$library" >&2
+      fi # if [ $buildid -ne 0 ]
+
+      if [ $is_stripped -ne 0 ]; then
+        for debug_info in $("$objdump" --dwarf=links "$library" 2>&1 | sed -ne 's/.*Separate debug info file: //p'); do
+          debug_file=${buildid%%${debug_info%.*}}/$debug_info
+          FOUND=0
+          for d in \
+            ./ /lib/debug/ /usr/lib/debug/ .debug/ \
+            "$(dirname $library)"/.debug/ "$(dirname $library)"/ \
+            "$(dirname $library_path)"/.debug/ "$(dirname $library_path)"/
+          do
+            for f in "$d$debug_file" "$d$debug_info" "$d.build-id/$debug_file" "$d.build-id/$debug_info"; do
+              if [ -f "$f" ]; then
+                FOUND=1
+                library_debug="$f"
+                library_filetype=$(file --dereference "$f")
+                case "$library_filetype" in
+                  *ELF*"not stripped"*) is_stripped=0;;
+                esac
+                break
+              fi
+            done
+            if [ $FOUND -ne 0 ]; then break; fi
+          done
+          if [ $FOUND -ne 0 ]; then break; fi
+        done
+        if [ $FOUND -eq 0 ]; then
+          # See if objdump can find it.
+          if ! "$objdump" --dwarf=links,follow-links "$library" 2>&1 | grep -q 'could not find separate debug file'; then
+            FOUND=1
+            dwarf_flag='--dwarf=follow-links'
+          fi
+        fi
+        if [ $FOUND -eq 0 ]; then
+          for f in \
+            "$(dirname "$library")/debug/$(basename "$library")" \
+            "$(dirname "$library_path")/debug/$(basename "$library_path")"
+          do
+            if [ -f "$f" ]; then
+              library_filetype=$(file --dereference "$f")
+              case "$library_filetype" in
+                *ELF*"not stripped"*)
+                  is_stripped=0
+                  FOUND=1
+                  library_debug="$f"
+                  NOPROBLEM=0
+                  cat >&2 <<EOF
+Warning: debug version of library '$library' not being used
+         Try running:
+           export LD_LIBRARY_PATH='$(dirname $f)':\$LD_LIBRARY_PATH
+         to fix this problem.
+EOF
+                  break
+                ;;
+              esac
+            fi
+          done
+        fi
+        if [ $FOUND -eq 0 ]; then
+          cat >&2 <<EOF
+Warning: separate debug file not found for '$library'.
+       Expected '$debug_info'
+EOF
+          warning_no_debuginfo=1
+          NOPROBLEM=0
+        fi
+      fi # if [ $is_stripped -ne 0 ]
+
+      if [ $is_stripped -ne 0 ]; then
+        if [ -z "$debug_info" ]; then
+          printf "Warning: ELF has been stripped '%s'\n" "$library" >&2
+          warning_no_unstrip=1
+          NOPROBLEM=0
+        fi
+      else
+        if "$objdump" -t $dwarf_flag "$library_debug" 2> /dev/null | grep -q "no symbols"; then
+          printf "Warning: no symbol table for '%s'\n" "$library" >&2
+          warning_no_symtab=1
+          NOPROBLEM=0
+        fi
+        if ! "$objdump" -j .debug_line -h $dwarf_flag "$library_debug" 2> /dev/null 1> /dev/null; then
+          if [ "$library" = "$1" ]; then
+            printf "Warning: no line numbers for '%s'\n" "$library" >&2
+          else
+            printf "Warning: no line numbers for '%s'\n" "$library" >&2
+          fi
+          warning_no_line=1
+          NOPROBLEM=0
+        fi
+      fi # [ $is_stripped -ne 0 ]
+    done
+
+    if [ $warning_no_buildid -ne 0 ]; then
+      any_warning=1
+      cat >&2 <<EOF
+
+# Build IDs
+
+The Build ID is used by perf to properly track all referenced code.  Build IDs
+can be automatically added during compilation for GNU ld by passing the
+--build-id option to the linker.  For gcc/clang this can be done via the flag
+--Wl,--build-id.
+
+For system libraries, vendors have hopefully already provided build IDs.  If
+not, you could potentially recompile these from source.  Alternatively you could
+insert an arbitrary build-id into the library; the value is unimportant it just
+has to be unique.
+EOF
+    fi
+    if [ $warning_no_unstrip -ne 0 ]; then
+      any_warning=1
+      cat >&2 <<EOF
+
+# Stripped ELF file
+
+ELF files can be stripped, removing debugging information.  This is often done
+for production libraries and executables to reduce their size.  This tool
+however works much better for unstripped versions of libraries.  You should
+either remove the 'strip' command from the compilation process, or otherwise
+obtain the unstripped version of the executable.
+EOF
+    fi
+    if [ $warning_no_debuginfo -ne 0 ]; then
+      any_warning=1
+      cat >&2 <<EOF
+
+# No separated debug info
+
+System libraries are sometimes shipped with separated debug info.  This means
+that debugging information such as function names or line numbers are stored in
+a separate ELF file.  You may need to install this separately, for example on
+Debian-based systems it may be available in the '<library package>-dbg' package.
+
+If the library that is missing symbols is uninteresting, it may be safe to
+ignore this warning.
+EOF
+    fi
+    if [ $warning_no_symtab -ne 0 ]; then
+      any_warning=1
+      cat >&2 <<EOF
+
+# No symbol table
+
+ELF files normally contain symbol tables that list the address and size of each
+function in the code.  If that is not present, the tool cannot relate code
+addresses with functions.  It is unusual for a symbol table to be missing unless
+the ELF file has been stripped.  You should either remove the 'strip' command
+from the compilation process, or otherwise obtain a version of the ELF file with
+a symbol table.
+EOF
+    fi
+    if [ $warning_no_line -ne 0 ]; then
+      any_warning=1
+      cat >&2 <<EOF
+
+# No line number information
+
+Line number information is normally calculated by the compiler if requested.
+This allows machine code addresses to be related back to source code lines to
+aid with debugging.  With gcc/clang for example, the '-g' flag can be passed to
+the compiler to cause this information to be generated.  This does not have a
+runtime overhead.
+
+For system libraries, this information may not be available at all.  You can try
+obtaining a 'debug' version of the library if available that might include this
+information.
+
+You can ignore this warning, but the tool will be unable to relate performance
+information with source code lines.
+EOF
+    fi
+  fi
+fi
+
+if [ -d "$result_dir" -a ! -w "$result_dir" ] || [ ! -d "$result_dir" -a ! -w "$(dirname "$result_dir")" ]; then
+  any_error=1
+      cat >&2 <<EOF
+Error: It is not be possible to create or write the '$result_dir' directory.
+
+       Try specifiying a different result directory (--result-dir=DIRECTORY).
+EOF
+fi
+
+if [ -z "${any_error+1}" -a -z "${any_warning+1}" -a -z "${flag_quiet+1}" ]; then
+  printf "No problems detected.\n"
+fi
+
+exit "${any_error:-0}"
