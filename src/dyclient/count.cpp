@@ -169,15 +169,18 @@ static void at_mbr(uint64_t src, app_pc branch_addr, app_pc targ);
 static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 
 #ifdef __x86_64__
+static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
+#endif
+
+#ifdef ADDR_CONV
+#ifdef __x86_64__
 static void at_call(app_pc call_addr, int len);
 static void at_return(app_pc inst_addr, app_pc targ_addr);
-static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
 #elif defined(__aarch64__)
 static void at_call(app_pc call_addr);
 static void at_return(app_pc targ_addr);
 #endif
-
-#ifndef ADDR_CONV
+#else // ! ifdef ADDR_CONV
 void stackoverflow_exit();
 #ifdef __x86_64__
 static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
@@ -186,7 +189,7 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
 static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
 static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t *where);
 #endif
-#endif
+#endif // ifdef ADDR_CONV else
 
 #if CHECK
 static uint64_t num_mbr = 0;
@@ -1262,8 +1265,8 @@ static address app_pc_to_address(app_pc arg, bool allow_miss) {
 #ifdef ADDR_CONV
 #ifdef __x86_64__
 static void at_call(app_pc call_addr, int len) {
-    DR_ASSERT(stack_index < (stack_size-1));
     stack_index++;
+    DR_ASSERT(stack_index < stack_size);
     #ifdef SP_CALL
     call_stack[stack_index] = { .call_addr = app_pc_to_address(call_addr),
                                 .return_addr = app_pc_to_address(call_addr+len),
@@ -1274,8 +1277,8 @@ static void at_call(app_pc call_addr, int len) {
 }
     #elif defined(__aarch64__)
 static void at_call(app_pc call_addr) {
-    DR_ASSERT(stack_index < (stack_size-1));
     stack_index++;
+    DR_ASSERT(stack_index < stack_size);
     call_stack[stack_index] = {.call_addr = app_pc_to_address(call_addr),
                                .return_addr = app_pc_to_address(call_addr+INST_LEN),
                                .counter = inst_counter
@@ -1323,66 +1326,7 @@ static void at_return(app_pc targ_addr) {
 }
 #endif
 
-#else // do not do address conversion in sp clean call
-#ifdef __x86_64__
-static void at_call(app_pc call_addr, int len) {
-    DR_ASSERT(stack_index < (stack_size-1));
-    stack_index++;
-    call_stack[stack_index] = { .call_addr = call_addr,
-                                .return_addr = call_addr+len,
-                                .counter = inst_counter,
-                                .pointer = &stack_counter_map_pc[call_addr]
-                              };
-    inst_counter = 0;
-}
-#elif defined(__aarch64__)
-static void at_call(app_pc call_addr) {
-    DR_ASSERT(stack_index < (stack_size-1));
-    stack_index++;
-    call_stack[stack_index] = {.call_addr = call_addr,
-                               .return_addr = call_addr+INST_LEN,
-                               .counter = inst_counter
-                              };
-
-    inst_counter = 0;
-}
-#endif
-
-#ifdef __x86_64__
-static void at_return(app_pc inst_addr, app_pc targ_addr) {
-    DR_ASSERT(stack_index >= 0);
-    stack_entry last_caller = call_stack[stack_index];
-    stack_index--;
-    if (targ_addr != last_caller.return_addr) // check if the retrun addr is correct
-        PRINTF_STDERR("Error: mismatched stack info: %lx, %lx\n", last_caller.call_addr,targ_addr);
-    bool found = false;
-    for (int64_t i = 0; i <= stack_index; ++i) {
-        if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
-    }
-    if (!found) {
-        stack_counter_map_pc[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-    }
-    inst_counter += last_caller.counter;
-}
-#elif defined(__aarch64__)
-static void at_return(app_pc targ_addr) {
-    stack_entry last_caller = call_stack[stack_index];
-    stack_index--;
-    if (targ_addr != last_caller.return_addr) // check if the retrun addr is correct
-        PRINTF_STDERR("Error: mismatched stack info: %lx, %lx\n",
-                  last_caller.call_addr, targ_addr);
-    bool found = false;
-    for (int16_t i = 0; i <= stack_index; ++i) {
-        if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
-    }
-    if (!found)
-        stack_counter_map_pc[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-    inst_counter += last_caller.counter;
-}
-#endif
-#endif // ADDR_CONV
-
-#ifndef ADDR_CONV
+#else // ! ifdef ADDR_CONV
 void stackoverflow_exit() {
     PRINT_STDERR("Error: overflow occurs when doing stack profiling! Please use a larger value for --stack-size.\n");
     dr_abort();
@@ -2001,4 +1945,4 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     dr_restore_reg(drcontext, bb, where, reg_stack_base, SPILL_SLOT_8);
 }
 #endif
-#endif
+#endif // ifdef ADDR_CONV else
