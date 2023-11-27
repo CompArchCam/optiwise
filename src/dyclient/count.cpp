@@ -85,6 +85,7 @@ typedef struct stack_entry {
     address call_addr;   // addr of the func call inst
     address return_addr; // addr of the inst next to func call
     uint64_t counter;    // num of inst executed in the callee func
+    void *stack_pointer; // the stack pointer at the time of the call
 } stack_entry;
 #else
 typedef struct stack_entry {
@@ -174,11 +175,12 @@ static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
 
 #ifdef ADDR_CONV
 #ifdef __x86_64__
-static void at_call(app_pc call_addr, int len);
+static void *global_stack_pointer;
+static void at_call(app_pc call_addr, void *stack_pointer, int len);
 static void at_return(app_pc inst_addr, app_pc targ_addr);
 #elif defined(__aarch64__)
-static void at_call(app_pc call_addr);
-static void at_return(app_pc targ_addr);
+static void at_call(app_pc call_addr, void *stack_pointer);
+static void at_return(app_pc targ_addr, void *stack_pointer);
 #endif
 #else // ! ifdef ADDR_CONV
 void stackoverflow_exit();
@@ -1160,7 +1162,8 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
             stack_counter_map[app_pc_to_address(addr_l)] = 0;
         #ifdef __x86_64__
         #ifdef ADDR_CONV
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false, 2, OPND_CREATE_INT64(addr_l),
+        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false, 3, OPND_CREATE_INT64(addr_l),
+                             opnd_create_reg(DR_REG_RSP),
                              OPND_CREATE_INT32(decode_sizeof(drcontext, addr_l, NULL, NULL)));
         #else
         if (stack_counter_map_pc.count(addr_l) == 0)
@@ -1169,7 +1172,8 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #endif
         #elif defined(__aarch64__)
         #ifdef ADDR_CONV
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false, 1, OPND_CREATE_INT(addr_l));
+        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false,
+                             2, OPND_CREATE_INT(addr_l), opnd_create_reg(DR_REG_XSP));
         #else
         if (stack_counter_map_pc.count(addr_l) == 0)
             stack_counter_map_pc[addr_l] = 0;
@@ -1179,6 +1183,9 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     } else if (instr_is_return(last_inst)) {
         #ifdef __x86_64__
         #ifdef ADDR_CONV
+        opnd_t gsp = OPND_CREATE_ABSMEM((::byte*) &global_stack_pointer, OPSZ_8);
+        instrlist_meta_preinsert(bb, last_inst,
+                                 INSTR_CREATE_mov_st(drcontext, gsp, opnd_create_reg(DR_REG_RSP)));
         dr_insert_mbr_instrumentation(drcontext, bb, last_inst, (void *) at_return, SPILL_SLOT_1);
         #else
         inlined_at_return_x86(drcontext, bb, last_inst);
@@ -1186,7 +1193,8 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #elif defined(__aarch64__)
         #ifdef ADDR_CONV
         opnd_t targ = instr_get_target(last_inst);
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_return, false, 1, targ);
+        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_return,
+                false, 2, targ, opnd_create_reg(DR_REG_XSP));
         #else
         inlined_at_return_aarch64(drcontext, bb, last_inst);
         #endif // ADDR_CONV
@@ -1264,40 +1272,35 @@ static address app_pc_to_address(app_pc arg, bool allow_miss) {
 
 #ifdef ADDR_CONV
 #ifdef __x86_64__
-static void at_call(app_pc call_addr, int len) {
+static void at_call(app_pc call_addr, void *stack_pointer, int len) {
     stack_index++;
     DR_ASSERT(stack_index < stack_size);
     #ifdef SP_CALL
     call_stack[stack_index] = { .call_addr = app_pc_to_address(call_addr),
                                 .return_addr = app_pc_to_address(call_addr+len),
-                                .counter = inst_counter
+                                .counter = inst_counter,
+                                .stack_pointer = (void **)stack_pointer - 1,
                               };
     inst_counter = 0;
     #endif
 }
-    #elif defined(__aarch64__)
-static void at_call(app_pc call_addr) {
+#elif defined(__aarch64__)
+static void at_call(app_pc call_addr, void *stack_pointer) {
     stack_index++;
     DR_ASSERT(stack_index < stack_size);
     call_stack[stack_index] = {.call_addr = app_pc_to_address(call_addr),
                                .return_addr = app_pc_to_address(call_addr+INST_LEN),
-                               .counter = inst_counter
+                               .counter = inst_counter,
+                               .stack_pointer = stack_pointer,
                               };
 
     inst_counter = 0;
 }
 #endif
 
-#ifdef __x86_64__
-static void at_return(app_pc inst_addr, app_pc targ_addr) {
-    // DR_ASSERT(stack_index >= 0);
-    stack_entry last_caller = call_stack[stack_index];
+static void do_return() {
+    const stack_entry &last_caller = call_stack[stack_index];
     stack_index--;
-    #ifdef SP_RET
-    if (app_pc_to_address(targ_addr) != last_caller.return_addr) // check if the retrun addr is correct
-        PRINTF_STDERR("Error: mismatched stack info: %ld %lx, %ld %lx\n",
-                  last_caller.call_addr.first, last_caller.call_addr.second,
-                  app_pc_to_address(targ_addr).first, app_pc_to_address(targ_addr).second);
     bool found = false;
     for (int64_t i = 0; i <= stack_index; ++i) {
         if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
@@ -1306,23 +1309,39 @@ static void at_return(app_pc inst_addr, app_pc targ_addr) {
         stack_counter_map[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
     }
     inst_counter += last_caller.counter;
-    #endif
 }
-#elif defined(__aarch64__)
-static void at_return(app_pc targ_addr) {
-    stack_entry last_caller = call_stack[stack_index];
-    stack_index--;
-    if (app_pc_to_address(targ_addr) != last_caller.return_addr) // check if the retrun addr is correct
+
+static void at_return_agnostic(app_pc targ_addr, void *stack_pointer) {
+    bool did_longjmp = false;
+    #ifdef SP_RET
+    if (call_stack[stack_index].stack_pointer != stack_pointer) {
+        for (auto i = stack_index; i >= 0; i--) {
+            if (call_stack[i].stack_pointer == stack_pointer) {
+                did_longjmp = true;
+                while (stack_index > i)
+                    do_return();
+                break;
+            }
+        }
+    }
+    const stack_entry &last_caller = call_stack[stack_index];
+    if (!did_longjmp && app_pc_to_address(targ_addr) != last_caller.return_addr) // check if the retrun addr is correct
         PRINTF_STDERR("Error: mismatched stack info: %ld %lx, %ld %lx\n",
                   last_caller.call_addr.first, last_caller.call_addr.second,
                   app_pc_to_address(targ_addr).first, app_pc_to_address(targ_addr).second);
-    bool found = false;
-    for (int16_t i = 0; i <= stack_index; ++i) {
-        if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
-    }
-    if (!found)
-        stack_counter_map[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-    inst_counter += last_caller.counter;
+    do_return();
+    #else
+    stack_index--;
+    #endif
+}
+
+#ifdef __x86_64__
+static void at_return(app_pc inst_addr, app_pc targ_addr) {
+    at_return_agnostic(targ_addr, global_stack_pointer);
+}
+#elif defined(__aarch64__)
+static void at_return(app_pc targ_addr, void *stack_pointer) {
+    at_return_agnostic(targ_addr, stack_pointer);
 }
 #endif
 
