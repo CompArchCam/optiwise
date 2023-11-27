@@ -1328,6 +1328,16 @@ static void at_return(app_pc targ_addr) {
 
 #else // ! ifdef ADDR_CONV
 void stackoverflow_exit() {
+    PRINTF_STDERR("Error: Stack overflow, stack contents:\n");
+    int i;
+    for (i = 0; i < stack_index; i++) {
+        address addr = app_pc_to_address(call_stack[i].return_addr);
+        PRINTF_STDERR("%10x [%s]\n", addr.second, modules.at(addr.first).path.c_str());
+        if (i == 20 && stack_index - 20 > i) {
+            i = stack_index - 21;
+            PRINTF_STDERR("   ...\n", addr.second, modules.at(addr.first).path.c_str());
+        }
+    }
     PRINT_STDERR("Error: overflow occurs when doing stack profiling! Please use a larger value for --stack-size.\n");
     dr_abort();
 }
