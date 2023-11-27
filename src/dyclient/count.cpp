@@ -172,7 +172,7 @@ static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 static void at_call(app_pc call_addr, int len);
 static void at_return(app_pc inst_addr, app_pc targ_addr);
 static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 static void at_call(app_pc call_addr);
 static void at_return(app_pc targ_addr);
 #endif
@@ -182,7 +182,7 @@ void stackoverflow_exit();
 #ifdef __x86_64__
 static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
 static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *where);
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
 static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t *where);
 #endif
@@ -248,7 +248,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
     /* print the architecture */
     #ifdef __x86_64__
     PRINT_STDOUT("x86_64\n");
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     PRINT_STDOUT("aarch64\n");
     #endif
 #endif
@@ -317,7 +317,7 @@ static void event_exit(void) {
             for (int j = 0; j < cfg_table[i].block_size; j++) {
                 block_bytes += cfg_table[i].inst_length[j];
             }
-            #elif defined(__arch64__)
+            #elif defined(__aarch64__)
             block_bytes = cfg_table[i].block_size * INST_LEN;
             #endif
             const address next(cfg_table[i].star_addr.first, cfg_table[i].star_addr.second + block_bytes);
@@ -423,7 +423,7 @@ static void event_exit(void) {
             for (int i = 0; i < next->second.block_size; ++i) {
                 next_bytes += next->second.inst_length[i];
             }
-            #elif defined(__arch64__)
+            #elif defined(__aarch64__)
             next_bytes = next->second.block_size * INST_LEN;
             #endif
             block.end_addr -= next_bytes;
@@ -566,7 +566,7 @@ static void event_exit(void) {
                 offset += itr->second.inst_length[i];
             }
             itr->second.end_addr = itr->first.second + offset;
-            #elif defined(__arch64__)
+            #elif defined(__aarch64__)
             itr->second.end_addr = itr->first.second + (itr->second.block_size-1)*INST_LEN; // update end address
             #endif
         }
@@ -818,7 +818,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     /* save arithmetic flags and registers */
     #ifdef __x86_64__
     dr_save_arith_flags(drcontext, bb, first_inst, SPILL_SLOT_1);
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     dr_save_reg(drcontext, bb, first_inst, DR_REG_X1, SPILL_SLOT_2);
     dr_save_reg(drcontext, bb, first_inst, DR_REG_X2, SPILL_SLOT_3);
     dr_save_reg(drcontext, bb, first_inst, DR_REG_X0, SPILL_SLOT_1);
@@ -853,7 +853,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         dr_restore_arith_flags(drcontext, bb, last_inst, SPILL_SLOT_2);
         /* insert app_cbr_label before the application cbr */
         instrlist_meta_preinsert(bb, last_inst, app_cbr_label);
-        #elif defined(__arch64__)
+        #elif defined(__aarch64__)
         /* save arithmetic flags and registers */
         dr_save_reg(drcontext, bb, NULL, DR_REG_X1, SPILL_SLOT_2);
         dr_save_reg(drcontext, bb, NULL, DR_REG_X2, SPILL_SLOT_3);
@@ -880,7 +880,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #ifdef __x86_64__
         mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].child[targ], OPSZ_8);
         instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
-        #elif defined(__arch64__)
+        #elif defined(__aarch64__)
         opnd_create_reg64((uint64_t) &cfg_table[block_num].child[targ], drcontext, bb, first_inst, reg_addr);
         mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
         instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
@@ -898,7 +898,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
             #ifdef __x86_64__
             mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].child[key], OPSZ_8);
             instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
-            #elif defined(__arch64__)
+            #elif defined(__aarch64__)
             opnd_create_reg64((uint64_t) &cfg_table[block_num].child[key], drcontext, bb, first_inst, reg_addr);
             mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
             instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
@@ -915,7 +915,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].count, OPSZ_8);
     // instrlist_meta_preinsert(bb, first_inst, LOCK(INSTR_CREATE_inc(drcontext, mem)));
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     opnd_create_reg64((uint64_t) &cfg_table[block_num].count, drcontext, bb, first_inst, reg_addr); // move the addr of counter to reg_addr
     mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
@@ -929,7 +929,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     #ifdef __x86_64__
     mem = OPND_CREATE_ABSMEM((::byte*) &inst_counter, OPSZ_8);
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT32(num_instructions)));
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     opnd_create_reg64((uint64_t) &inst_counter, drcontext, bb, first_inst, reg_addr); // move the addr of counter to reg_addr
     mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
@@ -941,7 +941,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     /* restore arithmetic flags and registers */
     #ifdef __x86_64__
     dr_restore_arith_flags(drcontext, bb, first_inst, SPILL_SLOT_1); // x86
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     dr_restore_arith_flags_from_reg(drcontext, bb, first_inst, DR_REG_X0);
     dr_restore_reg(drcontext, bb, first_inst, DR_REG_X0, SPILL_SLOT_1);
     dr_restore_reg(drcontext, bb, first_inst, DR_REG_X1, SPILL_SLOT_2);
@@ -1062,7 +1062,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         /* insert last_inst_label */
         instrlist_meta_preinsert(bb, last_inst, last_inst_label);
 #endif // jump mbr
-        #elif defined(__arch64__)
+        #elif defined(__aarch64__)
         DR_ASSERT(opnd_is_reg(target_opnd));
 #ifdef JUMP_MBR
         if (mbr_first_targ.count(addr_l) == 0)
@@ -1154,7 +1154,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
             stack_counter_map_pc[addr_l] = 0;
         inlined_at_call_x86(drcontext, bb, last_inst, addr_l, decode_sizeof(drcontext, addr_l, NULL, NULL));
         #endif
-        #elif defined(__arch64__)
+        #elif defined(__aarch64__)
         #ifdef ADDR_CONV
         dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false, 1, OPND_CREATE_INT(addr_l));
         #else
@@ -1170,7 +1170,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #else
         inlined_at_return_x86(drcontext, bb, last_inst);
         #endif // ADDR_CONV
-        #elif defined(__arch64__)
+        #elif defined(__aarch64__)
         #ifdef ADDR_CONV
         opnd_t targ = instr_get_target(last_inst);
         dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_return, false, 1, targ);
@@ -1187,7 +1187,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     dr_insert_clean_call(drcontext, bb, first_inst, (void *) clean_call, false, 4,
                         OPND_CREATE_INT32(num_instructions), OPND_CREATE_INT64(addr_f),
                         OPND_CREATE_INT64(addr_l), OPND_CREATE_INT32(opcode));
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
     dr_insert_clean_call(drcontext, bb, first_inst, (void *) clean_call, false, 4,
                         OPND_CREATE_INT(num_instructions), OPND_CREATE_INT(addr_f),
                         OPND_CREATE_INT(addr_l), OPND_CREATE_INT(opcode));
@@ -1262,7 +1262,7 @@ static void at_call(app_pc call_addr, int len) {
     inst_counter = 0;
     #endif
 }
-    #elif defined(__arch64__)
+    #elif defined(__aarch64__)
 static void at_call(app_pc call_addr) {
     DR_ASSERT(stack_index < (stack_size-1));
     stack_index++;
@@ -1295,7 +1295,7 @@ static void at_return(app_pc inst_addr, app_pc targ_addr) {
     inst_counter += last_caller.counter;
     #endif
 }
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 static void at_return(app_pc targ_addr) {
     stack_entry last_caller = call_stack[stack_index];
     stack_index--;
@@ -1325,7 +1325,7 @@ static void at_call(app_pc call_addr, int len) {
                               };
     inst_counter = 0;
 }
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 static void at_call(app_pc call_addr) {
     DR_ASSERT(stack_index < (stack_size-1));
     stack_index++;
@@ -1354,7 +1354,7 @@ static void at_return(app_pc inst_addr, app_pc targ_addr) {
     }
     inst_counter += last_caller.counter;
 }
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 static void at_return(app_pc targ_addr) {
     stack_entry last_caller = call_stack[stack_index];
     stack_index--;
@@ -1663,7 +1663,7 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
     dr_restore_reg(drcontext, bb, where, reg_stack_base, SPILL_SLOT_7);
 }
 
-#elif defined(__arch64__)
+#elif defined(__aarch64__)
 // insert instructions before where to achieve the functionality of at_call()
 static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len) {
     reg_id_t reg_index = DR_REG_X10;
