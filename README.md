@@ -7,7 +7,7 @@ instruction, per basic block, per loop, and per function overheads.
 
 # Building
 
-Running `make` will generate `install\_dir.ARCH` where `ARCH` is the ISA for
+Running `make` will generate `install_dir.ARCH` where `ARCH` is the ISA for
 example `x86_64`.  The `optiwise` command is available in the `bin`
 subdirectory of this. Consequently running:
 
@@ -31,7 +31,7 @@ optiwise run -- /usr/bin/echo hello
 
 would cause OptiWISE to profile the program `/usr/bin/echo` with the argument
 `hello`.  Note that this will run that program twice.  Results will be placed in
-the `optiwise_result/analyze/run` directory.
+the `optiwise_result/analyze/result` directory.
 
 For more fine grain control, see `optiwise help`.  The subcommands of OptiWISE
 will allow you to configure the individual jobs in OptiWISE and configure
