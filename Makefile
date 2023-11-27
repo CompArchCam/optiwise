@@ -45,6 +45,8 @@ uninstall:
 	$(MAKE) clean INSTALL_DIR=/usr
 .PHONY: install uninstall
 
+FORCE: ;
+.PHONY: FORCE
 ###############################################################################
 # DynamoRIO download & build & copy
 
@@ -64,9 +66,11 @@ $(INSTALL_DIR)/share/optiwise/dynamorio: | $(INSTALL_DIR)/share/optiwise/$(DYNAM
 # Scripts build & copy
 
 # Rules to copy scripts directly
+$(INSTALL_DIR)/bin/optiwise: FORCE
 $(INSTALL_DIR)/bin/%: scripts/bin/% | $(INSTALL_DIR)/bin
 	if version=$$(git describe --dirty); then \
 		sed -e "s/^version=.*/version=$$version/" $< > $@; \
+		chmod --reference=$< $@; \
 	else \
 		cp $< $@; \
 	fi
