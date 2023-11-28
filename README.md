@@ -1,9 +1,10 @@
 # OptiWISE
-OptiWISE is a profiling tool providing granular CPI and IPC analysis of
-programs.  It combines the information from two runs of the program: one using
-low-overhead sampling, and the other using high-overhead dynamic
-instrumentation.  The results of these two runs are then combined to give per
-instruction, per basic block, per loop, and per function overheads.
+OptiWISE is a profiling tool providing granular Cycles per Instruction (CPI) and
+Instructions per Cycle (IPC) analysis of x86-64 and AArch64 Linux programs.  It
+combines the information from two runs of the program: one using low-overhead
+sampling, and the other using high-overhead dynamic instrumentation.  The
+results of these two runs are then combined to give per instruction, per basic
+block, per loop, and per function overheads.
 
 # Building
 
