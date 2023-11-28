@@ -51,7 +51,18 @@ using namespace std;
 #define SP_RET /* Enable stack profiling on return side */
 /* ------------------------------------------------------------------------- */
 
+#ifdef __aarch64__
 #define INST_LEN 4 /* instruction length for AArch64 in byte */
+
+
+#ifndef INSTR_CREATE_madd
+/* This macro seems to be missing, at least in DynamoRIO 10.0.0 */
+#define INSTR_CREATE_madd(dc, Rd, Rn, Rm, Ra) \
+    instr_create_1dst_3src(dc, OP_madd, Rd, Rn, Rm, Ra)
+#endif
+
+#endif // ifdef __aarch64__
+
 size_t stack_size = 2048; /* max size of simulated stack for stack profiling */
 
 struct app_module;
@@ -93,6 +104,7 @@ typedef struct stack_entry {
     app_pc return_addr; // addr of the inst next to func call
     uint64_t counter;   // num of inst executed in the callee func
     uint64_t* pointer;  // point to stack_counter_map_pc[call_addr]
+    void *stack_pointer; // the stack pointer at the time of the call
 } stack_entry;
 #endif
 
@@ -1270,6 +1282,23 @@ static address app_pc_to_address(app_pc arg, bool allow_miss) {
     return address(mod->index, addr - mod->addr + mod->base);
 }
 
+static void do_return() {
+    const stack_entry &last_caller = call_stack[stack_index];
+    stack_index--;
+    bool found = false;
+    for (int64_t i = 0; i <= stack_index; ++i) {
+        if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
+    }
+    if (!found) {
+#ifdef ADDR_CONV
+        stack_counter_map[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
+#else
+        stack_counter_map_pc[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
+#endif
+    }
+    inst_counter += last_caller.counter;
+}
+
 #ifdef ADDR_CONV
 #ifdef __x86_64__
 static void at_call(app_pc call_addr, void *stack_pointer, int len) {
@@ -1297,19 +1326,6 @@ static void at_call(app_pc call_addr, void *stack_pointer) {
     inst_counter = 0;
 }
 #endif
-
-static void do_return() {
-    const stack_entry &last_caller = call_stack[stack_index];
-    stack_index--;
-    bool found = false;
-    for (int64_t i = 0; i <= stack_index; ++i) {
-        if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
-    }
-    if (!found) {
-        stack_counter_map[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-    }
-    inst_counter += last_caller.counter;
-}
 
 static void at_return_agnostic(app_pc targ_addr, void *stack_pointer) {
     bool did_longjmp = false;
@@ -1361,6 +1377,30 @@ void stackoverflow_exit() {
     dr_abort();
 }
 
+
+// runs whenever we detect the call stack has diverged from our copy
+static void handle_longjmp(void *stack_pointer) {
+    static bool have_warning = false;
+    if (call_stack[stack_index].stack_pointer != stack_pointer) {
+        for (auto i = stack_index; i >= 0; i--) {
+            if (call_stack[i].stack_pointer == stack_pointer) {
+                while (stack_index > i)
+                    do_return();
+                return;
+            }
+        }
+    }
+    if (!have_warning) {
+        PRINTF_STDERR(
+"Warning: profiling stack pointer desynchronized: %p != %p.\n",
+"         This likely means the application is doing odd things with the stack\n"
+"         pointer (e.g. co-routines). Nesting profiling information will likely\n"
+"         be inaccurate (e.g. bad statistics for loops with function calls).\n",
+                stack_pointer, call_stack[stack_index].stack_pointer);
+        have_warning = true;
+    }
+}
+
 #ifdef __x86_64__
 // insert instructions before where to achieve the functionality of at_call()
 static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len) {
@@ -1407,11 +1447,12 @@ static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where
                              INSTR_CREATE_mov_st(drcontext,
                                                  index,
                                                  opnd_create_reg(reg_index)));
-    /* reg_index <<= 5 (i.e., reg_index *= 32) */
+    /* reg_index *= sizeof(stack_entry) */
     instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_shl(drcontext,
+                             INSTR_CREATE_imul_imm(drcontext,
                                               opnd_create_reg(reg_index),
-                                              opnd_create_immed_int(5, OPSZ_1)));
+                                              opnd_create_reg(reg_index),
+                                              opnd_create_immed_int(sizeof(stack_entry), OPSZ_1)));
     /* move call_stack base address into reg_stack_base */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
@@ -1423,10 +1464,11 @@ static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where
                                               opnd_create_reg(reg_stack_base),
                                               opnd_create_reg(reg_index)));
     /* update call_stack[stack_index] */
-    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 0, OPSZ_8);
-    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 8, OPSZ_8);
-    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 16, OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 24, OPSZ_8);
+    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, call_addr), OPSZ_8);
+    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, return_addr), OPSZ_8);
+    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, counter), OPSZ_8);
+    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, pointer), OPSZ_8);
+    opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* update call_addr, reg_index is free */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
@@ -1463,6 +1505,19 @@ static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where
                              INSTR_CREATE_mov_st(drcontext,
                                                  pointer_mem,
                                                  opnd_create_reg(reg_index)));
+    /* set stack pointer = rsp - 8 */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_mov_ld(drcontext,
+                                                 opnd_create_reg(reg_index),
+                                                 opnd_create_reg(DR_REG_RSP)));
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_sub(drcontext,
+                                              opnd_create_reg(reg_index),
+                                              OPND_CREATE_INT8(sizeof(void *))));
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_mov_st(drcontext,
+                                                 stack_pointer_mem,
+                                                 opnd_create_reg(reg_index)));
     /* clear inst_counter */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_st(drcontext,
@@ -1488,14 +1543,15 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
     reg_id_t reg_index = DR_REG_R14;
     reg_id_t reg_stack_base = DR_REG_R15;
 
-    // opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 0, OPSZ_8);
-    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 8, OPSZ_8);
-    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 16, OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 24, OPSZ_8);
+    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, return_addr), OPSZ_8);
+    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, counter), OPSZ_8);
+    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, pointer), OPSZ_8);
+    opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* create labels */
     instr_t* loop_label = INSTR_CREATE_label(drcontext);
     instr_t* loop_end_label = INSTR_CREATE_label(drcontext);
     instr_t* end_label = INSTR_CREATE_label(drcontext);
+    instr_t* no_longjmp_label = INSTR_CREATE_label(drcontext);
     /* save arithmetic flag and registers */
     dr_save_arith_flags(drcontext, bb, where, SPILL_SLOT_1);
     dr_save_reg(drcontext, bb, where, reg_1, SPILL_SLOT_2);
@@ -1511,11 +1567,12 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
                              INSTR_CREATE_mov_ld(drcontext,
                                                  opnd_create_reg(reg_index),
                                                  index));
-    /* reg_index <<= 5 (i.e., reg_index *= 32) */
+    /* reg_index *= sizeof(stack_entry) */
     instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_shl(drcontext,
+                             INSTR_CREATE_imul_imm(drcontext,
                                               opnd_create_reg(reg_index),
-                                              opnd_create_immed_int(5, OPSZ_1)));
+                                              opnd_create_reg(reg_index),
+                                              opnd_create_immed_int(sizeof(stack_entry), OPSZ_1)));
     /* move call_stack base address into reg_stack_base */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
@@ -1526,6 +1583,47 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
                              INSTR_CREATE_add(drcontext,
                                               opnd_create_reg(reg_stack_base),
                                               opnd_create_reg(reg_index)));
+    /* reg1 <- call_stack[stack_index].stack_pointer */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_mov_ld(drcontext,
+                                                 opnd_create_reg(reg_1),
+                                                 stack_pointer_mem));
+    /* cmp stack_poiner, rsp */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_cmp(drcontext,
+                                              opnd_create_reg(reg_1),
+                                              opnd_create_reg(DR_REG_RSP)));
+    /* jump to no_longjmp if rsp == stack_pointer */
+    instr_t *longjmp_je = instr_create(drcontext);
+    instr_set_opcode(longjmp_je, OP_je);
+    instr_set_num_opnds(drcontext, longjmp_je, 0, 1);
+    instr_set_src(longjmp_je, 0, opnd_create_instr(no_longjmp_label));
+    instrlist_meta_preinsert(bb, where, longjmp_je);
+    /* call handle_longjmp */
+    dr_insert_clean_call(drcontext, bb, where, (void*) handle_longjmp, false, 1, opnd_create_reg(DR_REG_RSP));
+    /* reload values */
+    /* load stack_index into reg_index  */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_mov_ld(drcontext,
+                                                 opnd_create_reg(reg_index),
+                                                 index));
+    /* reg_index *= sizeof(stack_entry) */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_imul_imm(drcontext,
+                                              opnd_create_reg(reg_index),
+                                              opnd_create_reg(reg_index),
+                                              opnd_create_immed_int(sizeof(stack_entry), OPSZ_1)));
+    /* move call_stack base address into reg_stack_base */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_mov_imm(drcontext,
+                                                  opnd_create_reg(reg_stack_base),
+                                                  stack_base));
+    /* reg_stack_base = address of the element we want to access (reg_index is free after this instrumentaion) */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_add(drcontext,
+                                              opnd_create_reg(reg_stack_base),
+                                              opnd_create_reg(reg_index)));
+    instrlist_meta_preinsert(bb, where, no_longjmp_label);
     /* reg1, 2, 3 <- call_stack[stack_index].pointer, return_addr, counter */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_ld(drcontext,
@@ -1574,9 +1672,10 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
                                                  opnd_create_reg(reg_4),
                                                  opnd_create_reg(reg_index)));
     instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_shl(drcontext,
+                             INSTR_CREATE_imul_imm(drcontext,
                                               opnd_create_reg(reg_4),
-                                              opnd_create_immed_int(5, OPSZ_1)));
+                                              opnd_create_reg(reg_4),
+                                              opnd_create_immed_int(sizeof(stack_entry), OPSZ_1)));
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
                                                   opnd_create_reg(reg_stack_base),
@@ -1745,6 +1844,17 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
                              INSTR_CREATE_str(drcontext,
                                               pointer_mem,
                                               opnd_create_reg(reg_index)));
+    /* set stack_pointer = xsp */
+    /* reg_index = xsp */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_add(drcontext,
+                                              opnd_create_reg(reg_index),
+                                              opnd_create_reg(DR_REG_XSP),
+                                              OPND_CREATE_INT8(0)));
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_str(drcontext,
+                                              stack_pointer_mem,
+                                              opnd_create_reg(reg_index)));
     /* restore arithmetic flag and registers */
     dr_restore_arith_flags(drcontext, bb, where, SPILL_SLOT_1);
     dr_restore_reg(drcontext, bb, where, reg_index, SPILL_SLOT_2);
@@ -1762,13 +1872,15 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     reg_id_t reg_index_addr = DR_REG_X15;
     reg_id_t reg_stack_base = DR_REG_X16;
 
-    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 8, OPSZ_8);
-    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 16, OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, 24, OPSZ_8);
+    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, return_addr), OPSZ_8);
+    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, counter), OPSZ_8);
+    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, pointer), OPSZ_8);
+    opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* create labels */
     instr_t* loop_label = INSTR_CREATE_label(drcontext);
     instr_t* loop_end_label = INSTR_CREATE_label(drcontext);
     instr_t* end_label = INSTR_CREATE_label(drcontext);
+    instr_t* no_longjmp_label = INSTR_CREATE_label(drcontext);
     /* save arithmetic flag and registers */
     dr_save_arith_flags(drcontext, bb, where, SPILL_SLOT_1);
     dr_save_reg(drcontext, bb, where, reg_1, SPILL_SLOT_2);
@@ -1788,41 +1900,57 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_index),
                                               index));
-    /* reg_index <<= 5 (i.e., reg_index *= 32) */
-    instrlist_meta_preinsert(bb, where, INSTR_CREATE_movz(drcontext,
-                                                          opnd_create_reg(reg_1),
-                                                          OPND_CREATE_INT(5),
-                                                          OPND_CREATE_INT(0)));
-    instrlist_meta_preinsert(bb, where, instr_create_1dst_2src(drcontext, OP_lslv,
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_1)));
-    // instrlist_meta_preinsert(bb, where,
-    //                          INSTR_CREATE_shl(drcontext,
-    //                                           opnd_create_reg(reg_index),
-    //                                           opnd_create_immed_int(5, OPSZ_1)));
     /* move call_stack base address into reg_stack_base */
     instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
-    // instrlist_meta_preinsert(bb, where,
-    //                          INSTR_CREATE_mov_imm(drcontext,
-    //                                               opnd_create_reg(reg_stack_base),
-    //                                               stack_base));
-    /* reg_stack_base = address of the element we want to access */
+    /* reg_1 = sizeof(stack_entry) */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_1), sizeof(stack_entry));
+    /* reg_stack_base += reg_index * sizeof(stack_entry) */
+    instrlist_meta_preinsert(bb, where, INSTR_CREATE_madd(drcontext,
+                                                          opnd_create_reg(reg_stack_base),
+                                                          opnd_create_reg(reg_index),
+                                                          opnd_create_reg(reg_1),
+                                                          opnd_create_reg(reg_stack_base)));
+    /* reg1 <- call_stack[stack_index].stack_pointer */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_ldr(drcontext,
+                                              opnd_create_reg(reg_1),
+                                              stack_pointer_mem));
+    /* reg_2 = xsp */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_add(drcontext,
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_index)));
-    /*---decrement stack_index (reg_index is free) ---*/
-    /* reg_index >>= 5 (i.e., shift back to original value) */
-    instrlist_meta_preinsert(bb, where, INSTR_CREATE_movz(drcontext,
-                                                          opnd_create_reg(reg_3),
-                                                          OPND_CREATE_INT(5),
-                                                          OPND_CREATE_INT(0)));
-    instrlist_meta_preinsert(bb, where, instr_create_1dst_2src(drcontext, OP_lsrv,
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_3)));
+                                              opnd_create_reg(reg_2),
+                                              opnd_create_reg(DR_REG_XSP),
+                                              OPND_CREATE_INT8(0)));
+    /* cmp xsp, reg1 */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_cmp(drcontext,
+                                              opnd_create_reg(reg_1),
+                                              opnd_create_reg(reg_2)));
+    /* jump to no_longjmp if xsp == stack_pointer */
+    instr_t *longjmp_je = INSTR_CREATE_bcond(drcontext, opnd_create_instr(no_longjmp_label));
+    INSTR_PRED(longjmp_je, DR_PRED_EQ);
+    instrlist_meta_preinsert(bb, where, longjmp_je);
+    /* call handle_longjmp */
+    dr_insert_clean_call(drcontext, bb, where, (void*) handle_longjmp, false, 1, opnd_create_reg(DR_REG_XSP));
+    /* reload values */
+    /* move &stack_index into reg_stack_base */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index_addr), (uint64_t) &stack_index);
+    /* load stack_index into reg_index  */
+    instrlist_meta_preinsert(bb, where,
+                             INSTR_CREATE_ldr(drcontext,
+                                              opnd_create_reg(reg_index),
+                                              index));
+    /* move call_stack base address into reg_stack_base */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
+    /* reg_1 = sizeof(stack_entry) */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_1), sizeof(stack_entry));
+    /* reg_stack_base += reg_index * sizeof(stack_entry) */
+    instrlist_meta_preinsert(bb, where, INSTR_CREATE_madd(drcontext,
+                                                          opnd_create_reg(reg_stack_base),
+                                                          opnd_create_reg(reg_index),
+                                                          opnd_create_reg(reg_1),
+                                                          opnd_create_reg(reg_stack_base)));
+    instrlist_meta_preinsert(bb, where, no_longjmp_label);
     /* decrement */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_sub(drcontext,
@@ -1834,10 +1962,6 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
                              INSTR_CREATE_str(drcontext,
                                               index,
                                               opnd_create_reg(reg_index)));
-    // instrlist_meta_preinsert(bb, where,
-    //                          INSTR_CREATE_sub(drcontext,
-    //                                           index,
-    //                                           OPND_CREATE_INT8(1)));
     /* reg1, 2, 3 <- call_stack[stack_index].pointer, return_addr, counter */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
@@ -1875,23 +1999,16 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     INSTR_PRED(my_jge, DR_PRED_GT);
     instrlist_meta_preinsert(bb, where, my_jge);
     /*---access call_stack[i].return_addr---*/
-    instrlist_meta_preinsert(bb, where,
-                             XINST_CREATE_move(drcontext,
-                                                 opnd_create_reg(reg_4),
-                                                 opnd_create_reg(reg_index)));
-    /* reg_4 <<= 5 (i.e., reg_4 *= 32) */
-    instrlist_meta_preinsert(bb, where, instr_create_1dst_3src(drcontext, OP_ubfm,
-                                                               opnd_create_reg(reg_4),
-                                                               opnd_create_reg(reg_4),
-                                                               OPND_CREATE_INT(59), // (-shf) % 64
-                                                               OPND_CREATE_INT(58))); // 63 - shf
-    /* reg_stack_base = stack_base + 32*stack_index */
+    /* reg_stack_base = stack_base + sizeof(stack_entry)*stack_index */
     instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
-    instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_add(drcontext,
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_4)));
+    /* reg_4 = sizeof(stack_entry) */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_4), sizeof(stack_entry));
+    /* reg_stack_base += reg_index * sizeof(stack_entry) */
+    instrlist_meta_preinsert(bb, where, INSTR_CREATE_madd(drcontext,
+                                                          opnd_create_reg(reg_stack_base),
+                                                          opnd_create_reg(reg_index),
+                                                          opnd_create_reg(reg_4),
+                                                          opnd_create_reg(reg_stack_base)));
     /* reg4 = call_stack[i].return_addr */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
