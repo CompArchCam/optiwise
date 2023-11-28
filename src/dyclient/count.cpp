@@ -649,25 +649,35 @@ static void clean_call(uint block_size, app_pc start_pc, app_pc end_pc, int opco
 
 #ifdef __aarch64__
 /* move a 64-bit imm integer into register */
-static void opnd_create_reg64(uint64_t imm, void *drcontext, instrlist_t *bb, instr_t *where, opnd_t reg) {
-    uint16_t array[4];
+static void instr_create_reg64(instrlist_t *bb, instr_t *where, void *drcontext, opnd_t reg, uint64_t imm) {
+    bool have_movz = false;
     for (int i = 0; i < 4; ++i) {
-        array[i] = 0x000000000000ffff & (imm>>(16*i));
-        if (i == 0) {
+        uint16_t v = 0x000000000000ffff & (imm>>(16*i));
+        if (!v) continue;
+        if (!have_movz) {
+            have_movz = true;
             instrlist_meta_preinsert(bb,
                                      where,
                                      INSTR_CREATE_movz(drcontext,
                                                        reg,
-                                                       OPND_CREATE_INT(array[i]),
+                                                       OPND_CREATE_INT(v),
                                                        OPND_CREATE_INT(i*16)));
         } else {
             instrlist_meta_preinsert(bb,
                                      where,
                                      INSTR_CREATE_movk(drcontext,
                                                        reg,
-                                                       OPND_CREATE_INT(array[i]),
+                                                       OPND_CREATE_INT(v),
                                                        OPND_CREATE_INT(i*16)));
         }
+    }
+    if (!have_movz) {
+        instrlist_meta_preinsert(bb,
+                                 where,
+                                 INSTR_CREATE_movz(drcontext,
+                                                   reg,
+                                                   OPND_CREATE_INT(0),
+                                                   OPND_CREATE_INT(0)));
     }
 }
 #endif
@@ -860,7 +870,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         dr_save_reg(drcontext, bb, NULL, DR_REG_X0, SPILL_SLOT_1);
         dr_save_arith_flags_to_reg(drcontext, bb, NULL, DR_REG_X0);
         /* increment fall counter */
-        opnd_create_reg64((uint64_t) &cfg_table[block_num].fall_count, drcontext, bb, NULL, reg_addr);
+        instr_create_reg64(bb, NULL, drcontext, reg_addr, (uint64_t) &cfg_table[block_num].fall_count);
         mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
         instrlist_meta_preinsert(bb, NULL, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] to reg_val
         instrlist_meta_preinsert(bb, NULL, INSTR_CREATE_add(drcontext, reg_val, reg_val, OPND_CREATE_INT(1))); // increment reg_val
@@ -881,7 +891,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].child[targ], OPSZ_8);
         instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
         #elif defined(__aarch64__)
-        opnd_create_reg64((uint64_t) &cfg_table[block_num].child[targ], drcontext, bb, first_inst, reg_addr);
+        instr_create_reg64(bb, first_inst, drcontext, reg_addr, (uint64_t) &cfg_table[block_num].child[targ]);
         mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
         instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
         instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, reg_val, reg_val, OPND_CREATE_INT(1))); // increment reg_val
@@ -899,7 +909,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
             mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].child[key], OPSZ_8);
             instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
             #elif defined(__aarch64__)
-            opnd_create_reg64((uint64_t) &cfg_table[block_num].child[key], drcontext, bb, first_inst, reg_addr);
+            instr_create_reg64(bb, first_inst, drcontext, reg_addr, (uint64_t) &cfg_table[block_num].child[key]);
             mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
             instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
             instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, reg_val, reg_val, OPND_CREATE_INT(1))); // increment reg_val
@@ -916,7 +926,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     // instrlist_meta_preinsert(bb, first_inst, LOCK(INSTR_CREATE_inc(drcontext, mem)));
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
     #elif defined(__aarch64__)
-    opnd_create_reg64((uint64_t) &cfg_table[block_num].count, drcontext, bb, first_inst, reg_addr); // move the addr of counter to reg_addr
+    instr_create_reg64(bb, first_inst, drcontext, reg_addr, (uint64_t) &cfg_table[block_num].count); // move the addr of counter to reg_addr
     mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, reg_val, reg_val, OPND_CREATE_INT(1))); // increment reg_val
@@ -930,7 +940,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     mem = OPND_CREATE_ABSMEM((::byte*) &inst_counter, OPSZ_8);
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT32(num_instructions)));
     #elif defined(__aarch64__)
-    opnd_create_reg64((uint64_t) &inst_counter, drcontext, bb, first_inst, reg_addr); // move the addr of counter to reg_addr
+    instr_create_reg64(bb, first_inst, drcontext, reg_addr, (uint64_t) &inst_counter); // move the addr of counter to reg_addr
     mem = OPND_CREATE_MEM64(DR_REG_X2, 0); // set addr opnd for counter
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_ldr(drcontext, reg_val, mem)); // load [reg_addr] into reg_val
     instrlist_meta_preinsert(bb, first_inst, INSTR_CREATE_add(drcontext, reg_val, reg_val, OPND_CREATE_INT(num_instructions))); // increment reg_val
@@ -1082,7 +1092,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         }
         dr_save_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2); // save reg_first_addr
         dr_save_reg(drcontext, bb, last_inst, reg_tmp, SPILL_SLOT_3); // save reg_tmp
-        opnd_create_reg64((uint64_t) &mbr_first_targ[addr_l], drcontext, bb, last_inst, opnd_create_reg(reg_tmp));
+        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &mbr_first_targ[addr_l]);
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_ldr(drcontext,
                                                                  opnd_create_reg(reg_first_addr),
                                                                  OPND_CREATE_MEM64(reg_tmp, 0)));
@@ -1120,7 +1130,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         /* insert first_targ_label */
         instrlist_meta_preinsert(bb, last_inst, first_targ_label);
         /* increment the first target counter (targ of my_je) */
-        opnd_create_reg64((uint64_t) &cfg_table[block_num].first_targ, drcontext, bb, last_inst, opnd_create_reg(reg_first_addr));
+        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_first_addr), (uint64_t) &cfg_table[block_num].first_targ);
         mem = OPND_CREATE_MEM64(reg_first_addr, 0); // set addr opnd for counter
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_ldr(drcontext, opnd_create_reg(reg_tmp), mem));
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_add(drcontext,
@@ -1677,7 +1687,7 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
     dr_save_reg(drcontext, bb, where, reg_tmp, SPILL_SLOT_4);
 
     /* move &stack_index into reg_stack_base */
-    opnd_create_reg64((uint64_t) &stack_index, drcontext, bb, where, opnd_create_reg(reg_tmp));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &stack_index);
     opnd_t index = OPND_CREATE_MEM64(reg_tmp, 0);
 
     /* load stack_index into reg_index */
@@ -1712,43 +1722,37 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
                              INSTR_CREATE_str(drcontext,
                                               index,
                                               opnd_create_reg(reg_index)));
-    /* reg_index <<= 5 (i.e., reg_index *= 32) */
-    instrlist_meta_preinsert(bb, where, INSTR_CREATE_movz(drcontext,
-                                                          opnd_create_reg(reg_tmp),
-                                                          OPND_CREATE_INT(5),
-                                                          OPND_CREATE_INT(0)));
-    instrlist_meta_preinsert(bb, where, instr_create_1dst_2src(drcontext, OP_lslv,
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_index),
-                                                               opnd_create_reg(reg_tmp)));
     /* move call_stack base address into reg_stack_base */
-    opnd_create_reg64((uint64_t) call_stack, drcontext, bb, where, opnd_create_reg(reg_stack_base));
-    /* reg_stack_base = address of the element we want to access (reg_index is free after this instrumentaion) */
-    instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_add(drcontext,
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_stack_base),
-                                              opnd_create_reg(reg_index)));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
+    /* reg_tmp = sizeof(stack_entry) */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_tmp), sizeof(stack_entry));
+    /* reg_stack_base += reg_index * sizeof(stack_entry) */
+    instrlist_meta_preinsert(bb, where, INSTR_CREATE_madd(drcontext,
+                                                          opnd_create_reg(reg_stack_base),
+                                                          opnd_create_reg(reg_index),
+                                                          opnd_create_reg(reg_tmp),
+                                                          opnd_create_reg(reg_stack_base)));
     /* update call_stack[stack_index] */
-    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 0, OPSZ_8);
-    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 8, OPSZ_8);
-    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 16, OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, 24, OPSZ_8);
+    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, call_addr), OPSZ_8);
+    opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, return_addr), OPSZ_8);
+    opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, counter), OPSZ_8);
+    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, pointer), OPSZ_8);
+    opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* update call_addr, reg_index is free */
-    opnd_create_reg64((uint64_t) call_addr, drcontext, bb, where, opnd_create_reg(reg_index));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) call_addr);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_str(drcontext,
                                               call_addr_mem,
                                               opnd_create_reg(reg_index)));
     /* update retrun_addr */
-    opnd_create_reg64(((uint64_t) call_addr) + len, drcontext, bb, where, opnd_create_reg(reg_index));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), ((uint64_t) call_addr) + len);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_str(drcontext,
                                               return_addr_mem,
                                               opnd_create_reg(reg_index)));
     /* update counter */
     /* move &inst_counter into reg_tmp */
-    opnd_create_reg64((uint64_t) &inst_counter, drcontext, bb, where, opnd_create_reg(reg_tmp));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &inst_counter);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_index),
@@ -1763,7 +1767,7 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
                                               OPND_CREATE_MEM64(reg_tmp, 0),
                                               OPND_CREATE_ZR(opnd_create_reg(reg_tmp))));
     /* set pointer = &stack_counter_map_pc[call_addr] */
-    opnd_create_reg64((uint64_t) &stack_counter_map_pc[call_addr], drcontext, bb, where, opnd_create_reg(reg_index));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) &stack_counter_map_pc[call_addr]);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_str(drcontext,
                                               pointer_mem,
@@ -1804,7 +1808,7 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
 
     /*---access call_stack[stack_index]---*/
     /* move &stack_index into reg_stack_base */
-    opnd_create_reg64((uint64_t) &stack_index, drcontext, bb, where, opnd_create_reg(reg_index_addr));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index_addr), (uint64_t) &stack_index);
     opnd_t index = OPND_CREATE_MEM64(reg_index_addr, 0);
     /* load stack_index into reg_index  */
     instrlist_meta_preinsert(bb, where,
@@ -1825,7 +1829,7 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     //                                           opnd_create_reg(reg_index),
     //                                           opnd_create_immed_int(5, OPSZ_1)));
     /* move call_stack base address into reg_stack_base */
-    opnd_create_reg64((uint64_t) call_stack, drcontext, bb, where, opnd_create_reg(reg_stack_base));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
     // instrlist_meta_preinsert(bb, where,
     //                          INSTR_CREATE_mov_imm(drcontext,
     //                                               opnd_create_reg(reg_stack_base),
@@ -1909,7 +1913,7 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
                                                                OPND_CREATE_INT(59), // (-shf) % 64
                                                                OPND_CREATE_INT(58))); // 63 - shf
     /* reg_stack_base = stack_base + 32*stack_index */
-    opnd_create_reg64((uint64_t) call_stack, drcontext, bb, where, opnd_create_reg(reg_stack_base));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_stack_base), (uint64_t) call_stack);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_add(drcontext,
                                               opnd_create_reg(reg_stack_base),
@@ -1947,7 +1951,7 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     /*--- loop end ---*/
     /*--- update map[last_caller.call_addr] (reg_1) ---*/
     // load inst_counter into reg_4
-    opnd_create_reg64((uint64_t) &inst_counter, drcontext, bb, where, opnd_create_reg(reg_2));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_2), (uint64_t) &inst_counter);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_4),
@@ -1971,7 +1975,7 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     /*--- end_label ---*/
     instrlist_meta_preinsert(bb, where, end_label);
     /*--- inst_counter (reg_4) += last_caller.counter (reg_3) ---*/
-    opnd_create_reg64((uint64_t) &inst_counter, drcontext, bb, where, opnd_create_reg(reg_2));
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_2), (uint64_t) &inst_counter);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_4),
