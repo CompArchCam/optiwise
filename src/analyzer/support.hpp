@@ -17,7 +17,7 @@ using namespace std;
 
 struct app_module {
     string path;
-    map<uint64_t, uint64_t> file_offset_to_vaddr;
+    map<uint64_t, pair<uint64_t, uint64_t>> file_offset_to_vaddr;
 };
 
 typedef vector<app_module>::size_type app_module_id;

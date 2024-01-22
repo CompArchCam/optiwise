@@ -217,18 +217,39 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
             throw parse_error("Error: incorrect format in sample!", filename, lineno);
         }
         // Check this is a code mapping.
+        if (temp.size() < 3)
+            throw parse_error("Error: incorrect format in sample!", filename, lineno);
         if (temp[2] != 'x') return;
         string path;
         ss.get();
         getline(ss, path);
+        const uint64_t mmap_offset = offset;
         const app_module_id id(module_add_or_find(path));
         const app_module &mod = module_lookup(id);
-        auto offs = mod.file_offset_to_vaddr.upper_bound(offset);
-        if (offs != mod.file_offset_to_vaddr.begin()) {
-            offs--;
+        // find a program header line that this mapping covers entirely.
+        auto offs = mod.file_offset_to_vaddr.upper_bound(mmap_offset);
+        if (offs != mod.file_offset_to_vaddr.begin()) offs--;
+        bool range_found = false;
+        static bool ambiguous_mmap_warning = false;
+        for (; offs != mod.file_offset_to_vaddr.end(); offs++) {
             uint64_t file_offset = offs->first;
-            uint64_t vaddr = offs->second;
-            offset = vaddr + (offset - file_offset);
+            uint64_t vaddr = offs->second.first;
+            uint64_t filesz = offs->second.second;
+            if (filesz == 0) continue;
+            if (file_offset < mmap_offset || file_offset + filesz > mmap_offset + length) continue;
+            if (!range_found) {
+                offset = vaddr + (mmap_offset - file_offset);
+                range_found = true;
+            } else {
+                // multiple valid mappings found. Do they agree?
+                if (offset == vaddr + (mmap_offset - file_offset)) continue;
+                if (ambiguous_mmap_warning) continue;
+                cerr <<
+"Warning: ambiguous mmap in sampling run. This may mean samples get the incorrect\n"
+"         address, resulting in incorrect analysis."
+                    << endl;
+                ambiguous_mmap_warning = true;
+            }
         }
         loaded_modules.emplace_back(loaded_module{
             .addr = address,
@@ -388,23 +409,48 @@ static void parse_program_header_line(
         const string &filename,
         unsigned lineno,
         const string &asm_line,
-        app_module_id current_module
+        app_module_id current_module,
+        bool &last_load,
+        uint64_t &off,
+        uint64_t &vaddr
 ) {
+    // asm_line looks like e.g.
+    //     LOAD off    0x00000000006c9d80 vaddr 0x00000000008d9d80 paddr 0x00000000008d9d80 align 2**16
+    //          filesz 0x0000000001456ac0 memsz 0x0000000001456ac0 flags r-x
     istringstream sss(asm_line);
-    string type;
-    sss >> type;
 
-    if (!sss || type != "LOAD") return;
+    if (last_load) {
+        last_load = false;
 
-    string offs, vaddrs;
-    uint64_t off, vaddr;
+        string fileszs, memszs, flagss, flags;
+        uint64_t filesz, memsz;
 
-    sss >> offs >> hex >> showbase >> off
-        >> vaddrs >> hex >> showbase >> vaddr;
+        sss >> fileszs >> hex >> showbase >> filesz
+            >> memszs >> hex >> showbase >> memsz
+            >> flagss >> flags;
 
-    if (!sss) throw parse_error("bad program header line", filename, lineno);
+        if (!sss || fileszs != "filesz" || memszs != "memsz" || flagss !=
+                "flags") throw parse_error("bad program header line", filename, lineno);
+        if (flags.size() < 3)
+            throw parse_error("bad program header line", filename, lineno);
+        if (flags[2] != 'x') return;
 
-    modules[current_module].file_offset_to_vaddr[off] = vaddr;
+        modules[current_module].file_offset_to_vaddr[off] = make_pair(vaddr, filesz);
+    } else {
+        string type;
+        sss >> type;
+
+        if (!sss || type != "LOAD") return;
+
+        string offs, vaddrs;
+
+        sss >> offs >> hex >> showbase >> off
+            >> vaddrs >> hex >> showbase >> vaddr;
+
+        if (!sss || offs != "off" || vaddrs != "vaddr") throw parse_error("bad program header line", filename, lineno);
+
+        last_load = true;
+    }
 }
 
 static void parse_symbol_line(
@@ -546,6 +592,9 @@ void read_disassembly(string filename, objdump_table& objdump_result){
     const map<uint64_t, pair<function *, uint64_t>> empty_symtab;
     const map<uint64_t, pair<function *, uint64_t>> *current_symtab;
     current_symtab = &empty_symtab;
+    bool ph_last_load = false;
+    uint64_t ph_off = 0;
+    uint64_t ph_vaddr = 0;
     app_module_id current_module(-1);
     enum class parser_state {
         none,
@@ -596,7 +645,8 @@ void read_disassembly(string filename, objdump_table& objdump_result){
         case parser_state::in_file: break;
         case parser_state::in_program_header:
             parse_program_header_line(
-                    filename, lineno, asm_line, current_module
+                    filename, lineno, asm_line, current_module,
+                    ph_last_load, ph_off, ph_vaddr
             );
             break;
         case parser_state::in_disassembly:
