@@ -89,21 +89,21 @@ typedef struct cfg_node {           // each node is a DynamoRio Block with no ov
     #endif
     uint32_t block_size;            // size of the node block
     map<address, uint64_t> child;   // child of this node, <start address of successor, count of this block>
+    uint64_t callee_count;          // execution count of callees of this block
 } cfg_node;
 
 #ifdef ADDR_CONV
 typedef struct stack_entry {
-    address call_addr;   // addr of the func call inst
+    uint64_t *callee_count_pointer; // pointer to caller's callee_count field
     address return_addr; // addr of the inst next to func call
     uint64_t counter;    // num of inst executed in the callee func
     void *stack_pointer; // the stack pointer at the time of the call
 } stack_entry;
 #else
 typedef struct stack_entry {
-    app_pc call_addr;   // addr of the func call inst
+    uint64_t *callee_count_pointer; // pointer to caller's callee_count field
     app_pc return_addr; // addr of the inst next to func call
     uint64_t counter;   // num of inst executed in the callee func
-    uint64_t* pointer;  // point to stack_counter_map_pc[call_addr]
     void *stack_pointer; // the stack pointer at the time of the call
 } stack_entry;
 #endif
@@ -147,7 +147,6 @@ static map<app_pc, uint64_t> mbr_first_targ; // address of the first target of e
 /* TODO these variables will need to be in thread local storage in
    multi-threaded code. */
 static bool missed_mbr = false; // did an mbr fail to resolve target
-static bool module_unload_flag;
 static uint64_t prev_block; // index of previous block for mbr with missed targ
 #ifdef __x86_64__
 static map<app_pc, uint64_t> blocknum_table; // x86 only, used to find block_num for mbr
@@ -161,10 +160,6 @@ static address prev_block_cl; // address of previous block in clean call
 static uint64_t inst_counter; // global counter for number of inst executed in stack profiling
 static stack_entry* call_stack;
 static int64_t stack_index;
-static map<address, uint64_t> stack_counter_map; // number of instructions associated with each func call instruction
-#ifndef ADDR_CONV // no address conversion in stack profiling clean call
-static map<app_pc, uint64_t> stack_counter_map_pc; // number of instructions associated with each func call instruction
-#endif
 
 void *count_lock;
 
@@ -185,22 +180,22 @@ static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
 #endif
 
+static void do_return();
 #ifdef ADDR_CONV
+static void at_call(uint64_t *callee_count_pointer, void *stack_pointer, app_pc return_addr);
 #ifdef __x86_64__
 static void *global_stack_pointer;
-static void at_call(app_pc call_addr, void *stack_pointer, int len);
 static void at_return(app_pc inst_addr, app_pc targ_addr);
 #elif defined(__aarch64__)
-static void at_call(app_pc call_addr, void *stack_pointer);
 static void at_return(app_pc targ_addr, void *stack_pointer);
 #endif
 #else // ! ifdef ADDR_CONV
 void stackoverflow_exit();
 #ifdef __x86_64__
-static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
+static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, uint64_t *callee_count_pointer, app_pc return_addr);
 static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *where);
 #elif defined(__aarch64__)
-static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len);
+static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, uint64_t *callee_count_pointer, app_pc return_addr);
 static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t *where);
 #endif
 #endif // ifdef ADDR_CONV else
@@ -274,7 +269,6 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
     inst_counter = 0;
     prev_block = ~0;
     prev_block_cl = address(0, 0);
-    module_unload_flag = false;
     modules.emplace_back(app_module{
         .addr = 0,
         .end_addr = 0,
@@ -315,10 +309,14 @@ static void event_exit(void) {
                   "Num of total dynamic block: %ld",
                   cfg_table.size(), cfg_block.size()-1);
     #endif
+
+    /* clean up the stack (i.e., assume that those functions return at program exit) */
+    while (stack_index >= 0) do_return();
+
     /* fetch from pre-allocated cfg array */
     dycfg cfg_map;
     set<address> child_set; // for check entry of the cfg
-    PRINT_STDOUT("process cfg\n");
+    PRINT_STDOUT("Info: program exited; processing...\n");
     for (uint64_t i = 0; i < cfg_table.size(); ++i) {
         /* handle cbr counter */
         if (cfg_table[i].fall_count > 0) {
@@ -354,13 +352,15 @@ static void event_exit(void) {
         }
 
         /* move cfg into map */
-        cfg_node tmp_node = cfg_table[i];
+        const cfg_node &tmp_node = cfg_table[i];
         if (cfg_map.count(cfg_table[i].star_addr) == 0) {
             cfg_map[cfg_table[i].star_addr] = tmp_node;
         } else {
             DR_ASSERT(cfg_map[cfg_table[i].star_addr].end_addr == tmp_node.end_addr);
             cfg_map[cfg_table[i].star_addr].count += tmp_node.count;
             cfg_map[cfg_table[i].star_addr].first_targ += tmp_node.first_targ;
+            cfg_map[cfg_table[i].star_addr].callee_count +=
+                tmp_node.callee_count;
             if (!tmp_node.child.empty()) {
                 for (auto j: tmp_node.child) {
                     if (j.second != 0) { // avoid insert empty counter from duplicated element in cfg_table
@@ -390,25 +390,6 @@ static void event_exit(void) {
         cfg_map[cfg_table[cfg_table.size()-1].star_addr].child.clear(); // delete child of exit block
     }
 
-    /* clean up the stack (i.e., assume that those functions return at program exit) */
-    while (stack_index >= 0) { // use array
-        #ifdef ADDR_CONV
-        stack_counter_map[call_stack[stack_index].call_addr] += inst_counter;
-        #else // no address conversion in sp clean call
-        stack_counter_map_pc[call_stack[stack_index].call_addr] += inst_counter;
-        #endif
-        inst_counter += call_stack[stack_index].counter;
-        stack_index--;
-    }
-
-    #ifndef ADDR_CONV
-    if (!module_unload_flag){
-        for (auto itr: stack_counter_map_pc) {
-            stack_counter_map[app_pc_to_address(itr.first)] = stack_counter_map_pc[itr.first];
-        }
-    }
-    #endif
-
     /* merge overlap blocks */
     PRINT_STDOUT("Info: merge blocks\n");
     const char overlap_end[] = "[[fallthrough]]"; // used as the last instruction name to indicate a overlap break
@@ -422,7 +403,9 @@ static void event_exit(void) {
         if (block.end_addr == next->second.end_addr) { // blocks overlap
             next->second.count += block.count; // update execution count
             next->second.first_targ += block.first_targ; // update execution count
+            next->second.callee_count += block.callee_count;
             block.first_targ = 0;
+            block.callee_count = 0;
             for (auto itr_child : block.child) { // merge child blocks
                 if (next->second.child.count(itr_child.first) > 0) { // if the child of current block exists in the child of next block
                     next->second.child[itr_child.first] += itr_child.second;
@@ -514,7 +497,7 @@ static void event_exit(void) {
                          modules.at(m).index, modules.at(m).path.c_str());
         DR_ASSERT(len > 0);
     }
-    for (auto i: cfg_map) {
+    for (const auto &i: cfg_map) {
         const address &block_addr = i.first;
         const cfg_node &block = i.second;
         if (block_addr.first == 0 && block_addr.second == 0) {
@@ -529,11 +512,7 @@ static void event_exit(void) {
         const module_id mod = block_addr.first;
         const uint64_t block_offset = block_addr.second;
         const address block_end_addr(mod, block.end_addr);
-        uint64_t callee_count = 0;
-        if (stack_counter_map.count(block_end_addr) > 0) {
-            // if it is a func call inst with additional count in its callee
-            callee_count = stack_counter_map[block_end_addr];
-        }
+        const uint64_t callee_count = block.callee_count;
         len = dr_fprintf(cfg_file, "%zu:%" PRIx64 " %" PRIu64 " %" PRIu64 " %s\n",
                          modules[mod].index, block_offset, block.count,
                          callee_count, block.inst_name);
@@ -841,6 +820,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     cfg_table[block_num].count = 0;
     cfg_table[block_num].fall_count = 0;
     cfg_table[block_num].first_targ = 0;
+    cfg_table[block_num].callee_count = 0;
 
     /* save arithmetic flags and registers */
     #ifdef __x86_64__
@@ -1170,26 +1150,26 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
 #ifdef SP
     /* insert clean call for stack profiling */
     if (instr_is_call(last_inst)) {
-        if (stack_counter_map.count(app_pc_to_address(addr_l)) == 0)
-            stack_counter_map[app_pc_to_address(addr_l)] = 0;
+        uint64_t * const callee_count_pointer = &cfg_table[block_num].callee_count;
         #ifdef __x86_64__
-        #ifdef ADDR_CONV
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false, 3, OPND_CREATE_INT64(addr_l),
-                             opnd_create_reg(DR_REG_RSP),
-                             OPND_CREATE_INT32(decode_sizeof(drcontext, addr_l, NULL, NULL)));
-        #else
-        if (stack_counter_map_pc.count(addr_l) == 0)
-            stack_counter_map_pc[addr_l] = 0;
-        inlined_at_call_x86(drcontext, bb, last_inst, addr_l, decode_sizeof(drcontext, addr_l, NULL, NULL));
-        #endif
-        #elif defined(__aarch64__)
+        const app_pc return_addr = addr_l + decode_sizeof(drcontext, addr_l, NULL, NULL);
         #ifdef ADDR_CONV
         dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false,
-                             2, OPND_CREATE_INT(addr_l), opnd_create_reg(DR_REG_XSP));
+                             3, OPND_CREATE_INT64(callee_count_pointer),
+                             opnd_create_reg(DR_REG_RSP),
+                             OPND_CREATE_INT64(return_addr));
         #else
-        if (stack_counter_map_pc.count(addr_l) == 0)
-            stack_counter_map_pc[addr_l] = 0;
-        inlined_at_call_aarch64(drcontext, bb, last_inst, addr_l, INST_LEN);
+        inlined_at_call_x86(drcontext, bb, last_inst, callee_count_pointer, return_addr);
+        #endif
+        #elif defined(__aarch64__)
+        const app_pc return_addr = addr_l + INST_LEN;
+        #ifdef ADDR_CONV
+        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_call, false,
+                             3, OPND_CREATE_INT(callee_count_pointer),
+                             opnd_create_reg(DR_REG_XSP),
+                             OPND_CREATE_INT(return_addr));
+        #else
+        inlined_at_call_aarch64(drcontext, bb, last_inst, callee_count_pointer, return_addr);
         #endif
         #endif
     } else if (instr_is_return(last_inst)) {
@@ -1245,12 +1225,6 @@ static void event_module_load(void *drcontext, const module_data_t *info, bool l
 
 static void event_module_unload(void *drcontext, const module_data_t *info) {
     dr_mutex_lock(modules_lock);
-    #ifndef ADDR_CONV
-    module_unload_flag = true;
-    for (auto itr: stack_counter_map_pc) {
-        stack_counter_map[app_pc_to_address(itr.first)] = itr.second;
-    }
-    #endif
     for (auto itr = loaded_modules.begin(); itr != loaded_modules.end(); itr++) {
         const app_module *m = &modules[*itr];
         if (m->addr == (uint64_t)info->start) {
@@ -1290,23 +1264,19 @@ static void do_return() {
         if (call_stack[i].return_addr == last_caller.return_addr) { found = true; break; }
     }
     if (!found) {
-#ifdef ADDR_CONV
-        stack_counter_map[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-#else
-        stack_counter_map_pc[last_caller.call_addr] += inst_counter; // no duplicated element (i.e., no recursion)
-#endif
+        *last_caller.callee_count_pointer += inst_counter;
     }
     inst_counter += last_caller.counter;
 }
 
 #ifdef ADDR_CONV
 #ifdef __x86_64__
-static void at_call(app_pc call_addr, void *stack_pointer, int len) {
+static void at_call(uint64_t *callee_count_pointer, void *stack_pointer, app_pc return_addr) {
     stack_index++;
     DR_ASSERT(stack_index < stack_size);
     #ifdef SP_CALL
-    call_stack[stack_index] = { .call_addr = app_pc_to_address(call_addr),
-                                .return_addr = app_pc_to_address(call_addr+len),
+    call_stack[stack_index] = { .callee_count_pointer = callee_count_pointer,
+                                .return_addr = app_pc_to_address(return_addr),
                                 .counter = inst_counter,
                                 .stack_pointer = (void **)stack_pointer - 1,
                               };
@@ -1314,13 +1284,13 @@ static void at_call(app_pc call_addr, void *stack_pointer, int len) {
     #endif
 }
 #elif defined(__aarch64__)
-static void at_call(app_pc call_addr, void *stack_pointer) {
+static void at_call(uint64_t *callee_count_pointer, void *stack_pointer, app_pc return_addr) {
     stack_index++;
     DR_ASSERT(stack_index < stack_size);
-    call_stack[stack_index] = {.call_addr = app_pc_to_address(call_addr),
-                               .return_addr = app_pc_to_address(call_addr+INST_LEN),
-                               .counter = inst_counter,
-                               .stack_pointer = stack_pointer,
+    call_stack[stack_index] = { .callee_count_pointer = callee_count_pointer,
+                                .return_addr = app_pc_to_address(return_addr),
+                                .counter = inst_counter,
+                                .stack_pointer = stack_pointer,
                               };
 
     inst_counter = 0;
@@ -1343,7 +1313,7 @@ static void at_return_agnostic(app_pc targ_addr, void *stack_pointer) {
     const stack_entry &last_caller = call_stack[stack_index];
     if (!did_longjmp && app_pc_to_address(targ_addr) != last_caller.return_addr) // check if the retrun addr is correct
         PRINTF_STDERR("Error: mismatched stack info: %ld %lx, %ld %lx\n",
-                  last_caller.call_addr.first, last_caller.call_addr.second,
+                  last_caller.return_addr.first, last_caller.return_addr.second,
                   app_pc_to_address(targ_addr).first, app_pc_to_address(targ_addr).second);
     do_return();
     #else
@@ -1403,7 +1373,7 @@ static void handle_longjmp(void *stack_pointer) {
 
 #ifdef __x86_64__
 // insert instructions before where to achieve the functionality of at_call()
-static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len) {
+static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where, uint64_t *callee_count_pointer, app_pc return_addr) {
     opnd_t index = OPND_CREATE_ABSMEM((::byte*) &stack_index, OPSZ_8);
     opnd_t stack_base = OPND_CREATE_INT64((uint64_t) call_stack);
     opnd_t counter = OPND_CREATE_ABSMEM((::byte*) &inst_counter, OPSZ_8);
@@ -1464,25 +1434,24 @@ static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where
                                               opnd_create_reg(reg_stack_base),
                                               opnd_create_reg(reg_index)));
     /* update call_stack[stack_index] */
-    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, call_addr), OPSZ_8);
+    opnd_t callee_count_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, callee_count_pointer), OPSZ_8);
     opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, return_addr), OPSZ_8);
     opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, counter), OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, pointer), OPSZ_8);
     opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, stack_pointer), OPSZ_8);
-    /* update call_addr, reg_index is free */
+    /* update callee_count_pointer, reg_index is free */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
                                                   opnd_create_reg(reg_index),
-                                                  OPND_CREATE_INT64((uint64_t) call_addr)));
+                                                  OPND_CREATE_INT64((uint64_t) callee_count_pointer)));
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_st(drcontext,
-                                                 call_addr_mem,
+                                                 callee_count_pointer_mem,
                                                  opnd_create_reg(reg_index)));
     /* update retrun_addr */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_imm(drcontext,
                                                   opnd_create_reg(reg_index),
-                                                  OPND_CREATE_INT64(((uint64_t) call_addr) + len)));
+                                                  OPND_CREATE_INT64((uint64_t) return_addr)));
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_st(drcontext,
                                                  return_addr_mem,
@@ -1495,15 +1464,6 @@ static void inlined_at_call_x86(void *drcontext, instrlist_t *bb, instr_t *where
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_st(drcontext,
                                                  counter_mem,
-                                                 opnd_create_reg(reg_index)));
-    /* set pointer = &stack_counter_map_pc[call_addr] */
-    instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_mov_imm(drcontext,
-                                                  opnd_create_reg(reg_index),
-                                                  OPND_CREATE_INT64((uint64_t) &stack_counter_map_pc[call_addr])));
-    instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_mov_st(drcontext,
-                                                 pointer_mem,
                                                  opnd_create_reg(reg_index)));
     /* set stack pointer = rsp - 8 */
     instrlist_meta_preinsert(bb, where,
@@ -1543,9 +1503,9 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
     reg_id_t reg_index = DR_REG_R14;
     reg_id_t reg_stack_base = DR_REG_R15;
 
+    opnd_t callee_count_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, callee_count_pointer), OPSZ_8);
     opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, return_addr), OPSZ_8);
     opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, counter), OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, pointer), OPSZ_8);
     opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* create labels */
     instr_t* loop_label = INSTR_CREATE_label(drcontext);
@@ -1624,11 +1584,11 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
                                               opnd_create_reg(reg_stack_base),
                                               opnd_create_reg(reg_index)));
     instrlist_meta_preinsert(bb, where, no_longjmp_label);
-    /* reg1, 2, 3 <- call_stack[stack_index].pointer, return_addr, counter */
+    /* reg1, 2, 3 <- callee_count_pointer, return_addr, counter */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_ld(drcontext,
                                                  opnd_create_reg(reg_1),
-                                                 pointer_mem));
+                                                 callee_count_pointer_mem));
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_mov_ld(drcontext,
                                                  opnd_create_reg(reg_2),
@@ -1747,7 +1707,7 @@ static void inlined_at_return_x86(void *drcontext, instrlist_t *bb, instr_t *whe
 
 #elif defined(__aarch64__)
 // insert instructions before where to achieve the functionality of at_call()
-static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, app_pc call_addr, int len) {
+static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *where, uint64_t *callee_count_pointer, app_pc return_addr) {
     reg_id_t reg_index = DR_REG_X10;
     reg_id_t reg_stack_base = DR_REG_X11;
     reg_id_t reg_tmp = DR_REG_X12;
@@ -1805,19 +1765,18 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
                                                           opnd_create_reg(reg_tmp),
                                                           opnd_create_reg(reg_stack_base)));
     /* update call_stack[stack_index] */
-    opnd_t call_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, call_addr), OPSZ_8);
+    opnd_t callee_count_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, callee_count_pointer), OPSZ_8);
     opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, return_addr), OPSZ_8);
     opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, counter), OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, pointer), OPSZ_8);
     opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 1, offsetof(stack_entry, stack_pointer), OPSZ_8);
-    /* update call_addr, reg_index is free */
-    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) call_addr);
+    /* update callee_count_pointer, reg_index is free */
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) callee_count_pointer);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_str(drcontext,
-                                              call_addr_mem,
+                                              callee_count_pointer_mem,
                                               opnd_create_reg(reg_index)));
     /* update retrun_addr */
-    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), ((uint64_t) call_addr) + len);
+    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) return_addr);
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_str(drcontext,
                                               return_addr_mem,
@@ -1838,12 +1797,6 @@ static void inlined_at_call_aarch64(void *drcontext, instrlist_t *bb, instr_t *w
                              INSTR_CREATE_str(drcontext,
                                               OPND_CREATE_MEM64(reg_tmp, 0),
                                               OPND_CREATE_ZR(opnd_create_reg(reg_tmp))));
-    /* set pointer = &stack_counter_map_pc[call_addr] */
-    instr_create_reg64(bb, where, drcontext, opnd_create_reg(reg_index), (uint64_t) &stack_counter_map_pc[call_addr]);
-    instrlist_meta_preinsert(bb, where,
-                             INSTR_CREATE_str(drcontext,
-                                              pointer_mem,
-                                              opnd_create_reg(reg_index)));
     /* set stack_pointer = xsp */
     /* reg_index = xsp */
     instrlist_meta_preinsert(bb, where,
@@ -1872,9 +1825,9 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
     reg_id_t reg_index_addr = DR_REG_X15;
     reg_id_t reg_stack_base = DR_REG_X16;
 
+    opnd_t callee_count_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, callee_count_pointer), OPSZ_8);
     opnd_t return_addr_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, return_addr), OPSZ_8);
     opnd_t counter_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, counter), OPSZ_8);
-    opnd_t pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, pointer), OPSZ_8);
     opnd_t stack_pointer_mem = opnd_create_base_disp(reg_stack_base, DR_REG_NULL, 0, offsetof(stack_entry, stack_pointer), OPSZ_8);
     /* create labels */
     instr_t* loop_label = INSTR_CREATE_label(drcontext);
@@ -1962,11 +1915,11 @@ static void inlined_at_return_aarch64(void *drcontext, instrlist_t *bb, instr_t 
                              INSTR_CREATE_str(drcontext,
                                               index,
                                               opnd_create_reg(reg_index)));
-    /* reg1, 2, 3 <- call_stack[stack_index].pointer, return_addr, counter */
+    /* reg1, 2, 3 <- callee_count_pointer, return_addr, counter */
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_1),
-                                              pointer_mem));
+                                              callee_count_pointer_mem));
     instrlist_meta_preinsert(bb, where,
                              INSTR_CREATE_ldr(drcontext,
                                               opnd_create_reg(reg_2),
