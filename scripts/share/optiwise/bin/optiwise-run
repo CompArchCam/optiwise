@@ -13,7 +13,8 @@ while :; do
 Usage: optiwise run [<options>] [--] <program> [<arguments>]
 All-in-one profiling command. Roughly equivalent to 'optitwise check' then
 'optiwise sample' then 'optiwise disassemble' then 'optiwise count' then
-'optiwise analyze'. A good starting point for beginners.
+'optiwise analyze'. A good starting point for beginners. Pass --gui to also run
+'optiwise gui'.
 
 Some options to specific commands cannot be passed in this form, if more fine
 control is needed then run the commands individually.
@@ -25,6 +26,8 @@ Options:
                 Override the result directory (default: $result_dir).
   -n, --name    Specifies a name for output of this sampling run. Should be a
                 valid filename (not a path) (default: $name).
+  -g, --gui     Additionally, run 'optiwise gui' to generate a HTML/JavaScript
+                interface for viewing the output.
   -f, --frequency
                 Sets sampling frequency to specified value in Hz.
   -E, --objdump Override the name of the 'objdump' utility.
@@ -39,6 +42,7 @@ EOF
     --result-dir=*) result_dir="${1#--*=}";;
     -n|--name) shift; name="$1";;
     --name=*) name="${1#--*=}";;
+    -g|--gui) flag_gui="$1";;
     -f|--frequency) shift; frequency="--frequency=$1";;
     --frequency=*) frequency="--frequency=${1#--*=}";;
     -E|--objdump) shift; objdump="--objdump=$1";;
@@ -88,10 +92,10 @@ if [ ! -d "$result_dir" ]; then
 fi
 
 if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} -- "$@"
+  echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@"
 fi
 
-"$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} -- "$@" || exit $?
+"$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@" || exit $?
 
 if [ "${flag_verbose-}" ]; then
   echo "$share_bin_dir/optiwise-sample" \
@@ -130,5 +134,12 @@ if [ "${flag_verbose-}" ]; then
     ${flag_verbose-} --name="$name"
 fi
 
-exec "$share_bin_dir/optiwise-analyze" \
-  ${flag_verbose-} --name="$name"
+if [ "${flag_gui-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-gui" \
+      ${flag_verbose-} --name="$name"
+  fi
+
+  exec "$share_bin_dir/optiwise-gui" \
+    ${flag_verbose-} --name="$name"
+fi

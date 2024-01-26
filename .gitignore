@@ -3,3 +3,4 @@ install_dir*/
 DynamoRIO-*/
 optiwise_result/
 tests/bin*/
+__pycache__/

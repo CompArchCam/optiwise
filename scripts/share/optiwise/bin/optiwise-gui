@@ -1,0 +1,192 @@
+#!/bin/sh -u
+#
+# Script to gui and combine the output of sampling and execution counting.
+
+share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+share_dir="$(realpath "$share_bin_dir/..")"
+result_dir=optiwise_result
+
+while :; do
+  case "${1-}" in
+    -h|--help)
+      cat <<EOF
+Usage: optiwise gui [<options>]
+Generate an HTML and Javascript based interface for viewing the output of
+'optiwise analyze' and 'optiwise count' to HTML form.  Automatically opens the
+web browser if possible.
+
+Options:
+  -h, --help   Display this help.
+  -v, --verbose
+               Be more verbose in operation.
+  -d, --result-dir=<directory>
+               Override the result directory.
+  --no-browser Do not automatically start a web browser.
+  -n, --name   Sets all of the --name-* variables. Can be used to easily store
+               many separate profiling runs.
+  --name-gui   Name of the output directory to render to. Should be a valid
+               filename (not a path) (default: result).
+  --name-analyze
+               Name of the analyze output directory to render (default: most
+               recent).
+  --name-count Name of the execution counting run to render (default: most
+               recent).
+EOF
+      exit 0
+      ;;
+    -v|--verbose) flag_verbose="$1";;
+    -d|--result-dir) shift; result_dir=$1;;
+    --result-dir=*) result_dir=${1#--*=};;
+    --no-browser) flag_browser="$1";;
+    -n|--name) shift; name="$1";;
+    --name=*) name="${1#--*=}";;
+    --name-gui) shift; name_gui="$1";;
+    --name-gui=*) name_gui="${1#--*=}";;
+    --name-analyze) shift; name_analyze="$1";;
+    --name-analyze=*) name_analyze="${1#--*=}";;
+    --name-count) shift; name_count="$1";;
+    --name-count=*) name_count="${1#--*=}";;
+    --) shift; break;;
+    -?*)
+      cat >&2 <<EOF
+Unrecognized option '$1'
+Try '--help'
+EOF
+      exit 1
+      ;;
+    *) break;;
+  esac
+  shift
+done
+
+if [ "${1-}" ]; then
+  cat >&2 <<EOF
+Error: Unnecessary positional arguments detected e.g. '$1'.
+
+'optiwise gui' does not take any positional arguments, such as the name of the
+program to disassemble. In other words, use 'optiwise gui' not 'optiwise gui
+/bin/echo' or anything similar.
+
+See 'optiwise gui --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_count-}" ]; then
+  if [ "${name-}" ]; then
+    name_count="$name.txt"
+  elif [ -d "$result_dir" -a -d "$result_dir/count" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/count/"*; do
+      if [ -f "$f" ]; then
+        if
+          [ ! "${name_count-}" ] || \
+          [ "$f" -nt "$result_dir/count/$name_count" ]
+        then
+          name_count="${f#"$result_dir/count/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/count/${name_count-}" ]; then
+      cat >&2 <<EOF
+Error: No execution count runs found in result directory: '$result_dir/count'.
+
+Have you run 'optiwise count' yet? The gui requires an execution count first.
+
+See 'optiwise gui --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+if [ ! -f "$result_dir/count/$name_count" ]; then
+  cat >&2 <<EOF
+Error: Execution count run not found: '$result_dir/count/$name_count'.
+
+Have you run 'optiwise count' yet? The gui requires an execution count first.
+
+See 'optiwise gui --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_analyze-}" ]; then
+  if [ "${name-}" ]; then
+    name_analyze="$name"
+  elif [ -d "$result_dir" -a -d "$result_dir/analyze" ] ; then
+    # Loop to find newest file in the directory
+    for f in "$result_dir/analyze/"*; do
+      if [ -f "$f/structure.yaml" ]; then
+        if
+          [ ! "${name_analyze-}" ] || \
+          [ "$f/structure.yaml" -nt "$result_dir/analyze/$name_analyze/structure.yaml" ]
+        then
+          name_analyze="${f#"$result_dir/analyze/"}"
+        fi
+      fi
+    done
+    if [ ! -f "$result_dir/analyze/${name_analyze-}/structure.yaml" ]; then
+      cat >&2 <<EOF
+Error: No analyze output found in result directory: '$result_dir/analyze'.
+
+Have you run 'optiwise analyze' yet? The gui requires analysis first.
+
+See 'optiwise gui --help' for more information.
+EOF
+      exit 1
+    fi
+  fi
+fi
+if [ ! -f "$result_dir/analyze/${name_analyze-}/structure.yaml" ]; then
+  cat >&2 <<EOF
+Error: No analyze output found in result directory: '$result_dir/analyze/${name_analyze-}'.
+
+Have you run 'optiwise analyze' yet? The gui requires analysis first.
+
+See 'optiwise gui --help' for more information.
+EOF
+  exit 1
+fi
+
+if [ ! "${name_gui-}" ]; then
+  if [ "${name-}" ]; then
+    name_gui="$name"
+  else
+    name_gui=result
+  fi
+fi
+
+if [ ! -d "$result_dir/gui" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/gui"
+  fi
+  mkdir -p "$result_dir/gui" || exit $?
+fi
+if [ ! -d "$result_dir/gui/$name_gui" ]; then
+  if [ "${flag_verbose-}" ]; then
+    printf "Creating directory '%s'\n" "$result_dir/gui/$name_gui"
+  fi
+  mkdir -p "$result_dir/gui/$name_gui" || exit $?
+fi
+
+if [ ! "${flag_browser-}" ] && [ "${DISPLAY-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+      "$result_dir/analyze/$name_analyze" \
+      "$result_dir/gui/$name_gui" \
+    '&&' gnome-www-browser "$result_dir/gui/$name_gui/index.html"
+  fi
+  python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+    "$result_dir/analyze/$name_analyze" \
+    "$result_dir/gui/$name_gui" \
+  && gnome-www-browser "$result_dir/gui/$name_gui/index.html"
+else
+  if [ "${flag_verbose-}" ]; then
+    echo python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+      "$result_dir/analyze/$name_analyze" \
+      "$result_dir/gui/$name_gui"
+  fi
+  exec python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+    "$result_dir/analyze/$name_analyze" \
+    "$result_dir/gui/$name_gui"
+fi

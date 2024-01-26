@@ -29,8 +29,9 @@ DYNAMORIO_URL ?= https://github.com/DynamoRIO/dynamorio/releases/download/releas
 SRC_SCRIPTS := scripts/bin/optiwise $(wildcard scripts/share/optiwise/bin/*)
 INSTALL_SCRIPTS := $(patsubst scripts%,$(INSTALL_DIR)%,$(SRC_SCRIPTS))
 INSTALL_LIBS := $(addprefix $(INSTALL_DIR)/share/optiwise/lib/,liboptiwise.so libexit0.so)
+INSTALL_PYTHON := $(patsubst src/gui/%,$(INSTALL_DIR)/share/optiwise/lib/gui/%,$(wildcard src/gui/*.py))
 
-all: $(INSTALL_SCRIPTS) $(INSTALL_LIBS) $(INSTALL_DIR)/share/optiwise/dynamorio \
+all: $(INSTALL_SCRIPTS) $(INSTALL_LIBS) $(INSTALL_PYTHON) $(INSTALL_DIR)/share/optiwise/dynamorio \
 	$(INSTALL_DIR)/share/optiwise/bin/analyzer \
 	$(INSTALL_DIR)/share/optiwise/bin/analyzer-serial
 .PHONY: all
@@ -99,6 +100,11 @@ $(INSTALL_DIR)/share/optiwise/bin/analyzer-serial: $(BUILD_DIR)/analyzer-serial 
 	cp $< $@
 
 ###############################################################################
+# Gui copy
+$(INSTALL_DIR)/share/optiwise/lib/gui/%.py: src/gui/%.py | $(INSTALL_DIR)/share/optiwise/lib/gui
+	cp $< $@
+
+###############################################################################
 # Directory structure rules
 
 # Rules to make target directory structure
@@ -117,4 +123,6 @@ $(INSTALL_DIR)/share/optiwise: | $(INSTALL_DIR)/share
 $(INSTALL_DIR)/share/optiwise/bin: | $(INSTALL_DIR)/share/optiwise
 	[ -d "$@" ] || mkdir "$@"
 $(INSTALL_DIR)/share/optiwise/lib: | $(INSTALL_DIR)/share/optiwise
+	[ -d "$@" ] || mkdir "$@"
+$(INSTALL_DIR)/share/optiwise/lib/gui: | $(INSTALL_DIR)/share/optiwise/lib
 	[ -d "$@" ] || mkdir "$@"
