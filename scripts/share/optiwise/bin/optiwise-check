@@ -27,7 +27,9 @@ Options:
    --no-quiet
   -d, --result-dir=<directory>
                Override the result directory.
-  -E, --objdump Override the name of the 'objdump' utility.
+  -g, --gui    Check if 'optiwise gui' is likely to succeed.
+  -E, --objdump=<binary>
+               Override the path/name of the 'objdump' utility.
 EOF
       exit 0
       ;;
@@ -36,6 +38,7 @@ EOF
     -v|--verbose) unset flag_quiet;;
     -d|--result-dir) shift; result_dir=$1;;
     --result-dir=*) result_dir=${1#--*=};;
+    -g|--gui) flag_gui="$1";;
     -E|--objdump) shift; objdump="$1";;
     --objdump=*) objdump="${1#--*=}";;
     --) shift; break;;
@@ -428,6 +431,65 @@ Error: It is not be possible to create or write the '$result_dir' directory.
 
        Try specifiying a different result directory (--result-dir=DIRECTORY).
 EOF
+fi
+
+if [ "${flag_gui-}" ]; then
+  if [ -z "$(which python3)" ]; then
+    if grep -q -s "[Dd]ebian" /etc/os-release; then
+      python3_install_suggest=", perhaps via 'sudo apt install python3 python3-graphviz'"
+    else
+      python3_install_suggest=" from your package manager"
+    fi
+    cat >&2 <<EOF
+Error: python3 executable not found.
+
+       Try installing python3$python3_install_suggest.
+EOF
+    any_error=1
+  elif ! python3 -c 'import graphviz' > /dev/null 2> /dev/null; then
+    if grep -q -s "[Dd]ebian" /etc/os-release; then
+      python_graphviz_install_suggest=", perhaps via 'sudo apt install python3-graphviz'"
+    else
+      python_graphviz_install_suggest=" from your package manager"
+    fi
+    cat >&2 <<EOF
+Error: python3 -c 'import graphviz' failed.
+
+       Try installing python graphviz$python_graphviz_install_suggest.
+EOF
+    any_error=1
+  fi
+
+  if [ -z "$(which c++filt)" ]; then
+    if grep -q -s "[Dd]ebian" /etc/os-release; then
+      cxxfilt_install_suggest=", perhaps via 'sudo apt install binutils'"
+    else
+      cxxfilt_install_suggest=" from your package manager"
+    fi
+    cat >&2 <<EOF
+Warning: c++filt executable not found. This means the 'optiwise gui' will not
+         be able to provide demangled symbol names, so you may see function
+         names like '_Z3addii' instead of 'add(int, int)'.
+
+         Try installing c++filt$cxxfilt_install_suggest.
+EOF
+    any_warning=1
+  fi
+
+  if [ ! -x /usr/bin/ex ]; then
+    if grep -q -s "[Dd]ebian" /etc/os-release; then
+      ex_install_suggest=", perhaps via 'sudo apt install vim'"
+    else
+      ex_install_suggest=" from your package manager"
+    fi
+    cat >&2 <<EOF
+Warning: /usr/bin/ex executable not found. This means the 'optiwise gui' will
+         not be able to provide syntax highlighting.
+
+         Try installing ex (or vim)$ex_install_suggest.
+EOF
+    any_warning=1
+  fi
 fi
 
 if [ -z "${any_error+1}" -a -z "${any_warning+1}" -a -z "${flag_quiet+1}" ]; then

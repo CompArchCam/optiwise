@@ -108,6 +108,8 @@ Supported commands:
   count        Obtain execution count for program's execution.
   analyze      Analyze and combine output of 'sample', 'disassemble', and
                'count'.
+  gui          Generate an HTML/JavaScript GUI for viewing the output of
+               'analyze' as a series of static html pages.
 
 By default results and temporary files will go in the 'optiwise_result'
 directory within the working directory.  The output of each subcommand generally
