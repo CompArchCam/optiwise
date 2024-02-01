@@ -82,8 +82,8 @@ $(INSTALL_DIR)/share/optiwise/bin/%: scripts/share/optiwise/bin/% | $(INSTALL_DI
 
 $(BUILD_DIR)/dyclient/Makefile: src/dyclient/CMakeLists.txt | $(BUILD_DIR)/dyclient $(DYNAMORIO_DIRNAME)/bin64/drrun
 	cd $(BUILD_DIR)/dyclient; cmake -DDynamoRIO_DIR=../../$(DYNAMORIO_DIRNAME)/cmake ../../src/dyclient
-$(BUILD_DIR)/dyclient/bin/liboptiwise.so $(BUILD_DIR)/dyclient/bin/libexit0.so: $(BUILD_DIR)/dyclient/Makefile src/dyclient/*.cpp
-	$(MAKE) -C $(BUILD_DIR)/dyclient
+$(BUILD_DIR)/dyclient/bin/lib%.so: $(BUILD_DIR)/dyclient/Makefile src/dyclient/*.cpp
+	$(MAKE) -C $(BUILD_DIR)/dyclient $*
 $(INSTALL_DIR)/share/optiwise/lib/%.so: $(BUILD_DIR)/dyclient/bin/%.so | $(INSTALL_DIR)/share/optiwise/lib
 	cp $< $@
 
