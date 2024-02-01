@@ -497,6 +497,25 @@ static void parse_symbol_line(
     sss >> first;
     function *f = new function();
     f->name = asm_line.substr(size_t(sss.tellg())-1);
+    /* strip non-name prefixes that sometimes are present */
+    const size_t name_space = f->name.find(' ');
+    if (name_space != string::npos) {
+        if (f->name.substr(0, 8) == ".hidden ") {
+            f->name = f->name.substr(8);
+        } else if (f->name.substr(0, 10) == ".internal ") {
+            f->name = f->name.substr(10);
+        } else if (f->name.substr(0, 11) == ".protected ") {
+            f->name = f->name.substr(11);
+        } else if (f->name.substr(0, 2) == "0x" && name_space > 2) {
+            bool not_hex = false;
+            for (size_t i = 2; i < name_space; i++) {
+                if (isxdigit(f->name.at(i))) continue;
+                not_hex = true;
+                break;
+            }
+            if (!not_hex) f->name = f->name.substr(name_space + 1);
+        }
+    }
     // prefer functions with size if possible
     if (symbol_table[section].count(addr) > 0 && size == 0) return;
     symbol_table[section][addr] = make_pair(f, size);
