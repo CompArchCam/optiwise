@@ -83,7 +83,12 @@ typedef struct cfg_node {           // each node is a DynamoRio Block with no ov
     uint64_t end_addr;              // end addr of this block
     const char *inst_name;          // name of last inst
     uint64_t fall_count;            // counter for fall-through addr of cbr
-    uint64_t first_targ;            // counter of the first target if the block ends with mbr
+#ifdef JUMP_MBR
+    uint64_t first_targ_count;      // counter of the first target if the block ends with mbr
+    uint64_t first_targ_pc;         // app_pc of the fist target encountered if the block ends with mbr
+    address first_targ_addr;        // address of the first target encountered if the block ends with mbr
+#endif
+    map<app_pc, address> missed_mbr_table; // app_pc -> actual address conversion for MBRs
     #ifdef __x86_64__
     int* inst_length;               // pointer to an array containing all inst length
     #endif
@@ -142,18 +147,18 @@ public:
 };
 
 static FixedAddressVector<cfg_node> cfg_table;
-static map<app_pc, uint64_t> mbr_first_targ; // address of the first target of each mbr
 
 /* TODO these variables will need to be in thread local storage in
    multi-threaded code. */
 static bool missed_mbr = false; // did an mbr fail to resolve target
+#ifdef JUMP_MBR
+static bool missed_mbr_first_targ = false; // did an mbr fail to resolve target
+#endif
 static uint64_t prev_block; // index of previous block for mbr with missed targ
 #ifdef __x86_64__
 static map<app_pc, uint64_t> blocknum_table; // x86 only, used to find block_num for mbr
-static map<pair<address, app_pc>, address> missed_mbr_table; // x86 only, <addr_of_missed_mbr,missed_targ>, true_targ>>
-static app_pc missed_targ; // x86 only, address of the missed targ in previous block
-static uint64_t mbr_target_addr; // target_opnd is mem
 #endif
+static app_pc missed_targ; // address of the missed targ in previous block
 
 static address prev_block_cl; // address of previous block in clean call
 
@@ -172,8 +177,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
 static void clean_call(uint block_size, app_pc start_pc, app_pc end_pc, int opcode);
 static void event_module_load(void *drcontext, const module_data_t *info, bool loaded);
 static void event_module_unload(void *drcontext, const module_data_t *info);
-static void mbr_clean_call(void *drcontext, uint64_t src, app_pc targ);
-static void at_mbr(uint64_t src, app_pc branch_addr, app_pc targ);
+static void at_mbr(uint64_t src, app_pc targ);
 static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 
 #ifdef __x86_64__
@@ -345,11 +349,13 @@ static void event_exit(void) {
             }
         }
 
+#ifdef JUMP_MBR
         /* correct count of the first target of mbr */
-        if (cfg_table[i].first_targ > 0) {
-            address tmp = app_pc_to_address((app_pc) mbr_first_targ[(app_pc) (cfg_table[i].end_addr + modules[cfg_table[i].star_addr.first].addr)]);
-            cfg_table[i].child[tmp] += cfg_table[i].first_targ;
+        if (cfg_table[i].first_targ_count > 0) {
+            cfg_table[i].child[cfg_table[i].first_targ_addr] += cfg_table[i].first_targ_count;
+            cfg_table[i].first_targ_count = 0;
         }
+#endif
 
         /* move cfg into map */
         const cfg_node &tmp_node = cfg_table[i];
@@ -358,7 +364,6 @@ static void event_exit(void) {
         } else {
             DR_ASSERT(cfg_map[cfg_table[i].star_addr].end_addr == tmp_node.end_addr);
             cfg_map[cfg_table[i].star_addr].count += tmp_node.count;
-            cfg_map[cfg_table[i].star_addr].first_targ += tmp_node.first_targ;
             cfg_map[cfg_table[i].star_addr].callee_count +=
                 tmp_node.callee_count;
             if (!tmp_node.child.empty()) {
@@ -402,9 +407,7 @@ static void event_exit(void) {
         auto next = std::next(itr);
         if (block.end_addr == next->second.end_addr) { // blocks overlap
             next->second.count += block.count; // update execution count
-            next->second.first_targ += block.first_targ; // update execution count
             next->second.callee_count += block.callee_count;
-            block.first_targ = 0;
             block.callee_count = 0;
             for (auto itr_child : block.child) { // merge child blocks
                 if (next->second.child.count(itr_child.first) > 0) { // if the child of current block exists in the child of next block
@@ -678,30 +681,30 @@ static void instr_create_reg64(instrlist_t *bb, instr_t *where, void *drcontext,
 }
 #endif
 
-static void mbr_clean_call(void *drcontext, uint64_t src, app_pc targ) {
-    uint64_t targ_u = (uint64_t) dr_read_saved_reg(drcontext, SPILL_SLOT_4);
-    const address targ_addr(app_pc_to_address((app_pc)targ_u, true));
-    if (targ_addr.first == 0) {
-        missed_mbr = true;
-        prev_block = src;
-        return;
-    }
-    if (cfg_table[src].child.count(targ_addr) == 0)
-        cfg_table[src].child[targ_addr] = 1;
-    else
-        cfg_table[src].child[targ_addr] += 1;
-}
-
-static void at_mbr(uint64_t src, app_pc branch_addr, app_pc targ) {
-#ifdef JUMP_MBR
-    if (mbr_first_targ[branch_addr] == 0) {
-        mbr_first_targ[branch_addr] = (uint64_t) targ;
-    }
-#endif
+static void at_mbr(uint64_t src, app_pc targ) {
     const address targ_addr(app_pc_to_address(targ, true));
+#ifdef JUMP_MBR
+    if (cfg_table[src].first_targ_pc == 0) {
+        cfg_table[src].first_targ_pc = (uint64_t) targ;
+        cfg_table[src].first_targ_addr = targ_addr;
+        missed_mbr_first_targ = true;
+    } else
+        missed_mbr_first_targ = false;
+#endif
     if (targ_addr.first == 0) {
         missed_mbr = true;
         prev_block = src;
+        if (cfg_table[src].missed_mbr_table.count(targ) == 0) {
+            cfg_table[src].missed_mbr_table[targ] = address(0, 0);
+            missed_targ = targ;
+        } else {
+            const address real_targ_addr(cfg_table[src].missed_mbr_table[targ]);
+#ifdef JUMP_MBR
+            cfg_table[src].first_targ_addr = real_targ_addr;
+#endif
+            cfg_table[src].child[real_targ_addr] += 1;
+            missed_mbr = false;
+        }
         return;
     }
     if (cfg_table[src].child.count(targ_addr) == 0)
@@ -713,32 +716,7 @@ static void at_mbr(uint64_t src, app_pc branch_addr, app_pc targ) {
 #ifdef __x86_64__
 static void at_mbr_x86(app_pc instr_addr, app_pc target_addr) {
     uint64_t src = blocknum_table[instr_addr];
-#ifdef JUMP_MBR
-    if (mbr_first_targ[instr_addr] == 0) {
-        mbr_first_targ[instr_addr] = (uint64_t) target_addr;
-    }
-#endif
-    const address targ_addr(app_pc_to_address(target_addr, true));
-    /* missed_mbr */
-    if (targ_addr.first == 0) {
-        missed_mbr = true;
-        prev_block = src;
-        const address mbr_addr(app_pc_to_address(instr_addr, true));
-        auto tmp_pair = make_pair(mbr_addr, target_addr);
-        if (missed_mbr_table.count(tmp_pair) == 0) {
-            missed_mbr_table[tmp_pair] = address(0, 0);
-            missed_targ = target_addr;
-        } else {
-            cfg_table[src].child[missed_mbr_table[tmp_pair]] += 1;
-            missed_mbr = false;
-        }
-        return;
-    }
-
-    if (cfg_table[src].child.count(targ_addr) == 0)
-        cfg_table[src].child[targ_addr] = 1;
-    else
-        cfg_table[src].child[targ_addr] += 1;
+    at_mbr(src, target_addr);
 }
 #endif
 
@@ -778,9 +756,12 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     if (missed_mbr) {
         /* Last block was an mbr to an unloaded module. The dynamic linker will
          * now have resolved this and this block is the real target. */
-        #ifdef __x86_64__
-        missed_mbr_table[make_pair(cfg_table[prev_block].star_addr, missed_targ)] = key;
-        #endif
+#ifdef JUMP_MBR
+        if (missed_mbr_first_targ) {
+            cfg_table[prev_block].first_targ_addr = key;
+        }
+#endif
+        cfg_table[prev_block].missed_mbr_table[missed_targ] = key;
         if (cfg_table[prev_block].child.count(key) == 0)
             cfg_table[prev_block].child[key] = 1;
         else
@@ -819,7 +800,10 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     cfg_table[block_num].block_size = num_instructions;
     cfg_table[block_num].count = 0;
     cfg_table[block_num].fall_count = 0;
-    cfg_table[block_num].first_targ = 0;
+#ifdef JUMP_MBR
+    cfg_table[block_num].first_targ_count = 0;
+    cfg_table[block_num].first_targ_pc = 0;
+#endif
     cfg_table[block_num].callee_count = 0;
 
     /* save arithmetic flags and registers */
@@ -966,8 +950,6 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #ifdef __x86_64__
         DR_ASSERT(opnd_is_reg(target_opnd) || opnd_is_memory_reference(target_opnd));
 #ifdef JUMP_MBR
-        if (mbr_first_targ.count(addr_l) == 0)
-            mbr_first_targ[addr_l] = 0;
         /* create label */
         instr_t* first_targ_label = INSTR_CREATE_label(drcontext);
         instr_t* last_inst_label = INSTR_CREATE_label(drcontext);
@@ -1026,11 +1008,11 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
             else
                 instrlist_meta_preinsert(bb, last_inst, newinst);
         }
-        /* move mbr_first_targ[addr_f] into reg_first_addr */
+        /* move cfg_table[block_num].first_targ_pc into reg_first_addr */
         instrlist_meta_preinsert(bb, last_inst,
                                  INSTR_CREATE_mov_ld(drcontext,
                                                      opnd_create_reg(reg_first_addr),
-                                                     OPND_CREATE_ABSMEM((::byte*) &mbr_first_targ[addr_l], OPSZ_8)));
+                                                     OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].first_targ_pc, OPSZ_8)));
         /* create cmp */
         dr_save_arith_flags(drcontext, bb, last_inst, SPILL_SLOT_1);
         instrlist_meta_preinsert(bb, last_inst,
@@ -1063,7 +1045,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         /* insert first_targ_label */
         instrlist_meta_preinsert(bb, last_inst, first_targ_label);
         /* increment the first target counter (targ of my_je) */
-        mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].first_targ, OPSZ_8); // first targ
+        mem = OPND_CREATE_ABSMEM((::byte*) &cfg_table[block_num].first_targ_count, OPSZ_8); // first targ
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_add(drcontext, mem, OPND_CREATE_INT8(1)));
         dr_restore_arith_flags(drcontext, bb, last_inst, SPILL_SLOT_1); // restore if my_je is taken
         /* insert last_inst_label */
@@ -1072,12 +1054,10 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #elif defined(__aarch64__)
         DR_ASSERT(opnd_is_reg(target_opnd));
 #ifdef JUMP_MBR
-        if (mbr_first_targ.count(addr_l) == 0)
-            mbr_first_targ[addr_l] = 0;
         /* create label */
         instr_t* first_targ_label = INSTR_CREATE_label(drcontext);
         instr_t* last_inst_label = INSTR_CREATE_label(drcontext);
-        /* move mbr_first_targ[addr_f] into reg_first_addr */
+        /* move cfg_table[block_num].first_targ_pc into reg_first_addr */
         reg_id_t reg_first_addr, reg_tmp;
         for (reg_first_addr = DR_REG_X0+1; reg_first_addr <= DR_REG_X30; reg_first_addr++) {
             if (!instr_uses_reg(last_inst, reg_first_addr))
@@ -1089,7 +1069,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         }
         dr_save_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2); // save reg_first_addr
         dr_save_reg(drcontext, bb, last_inst, reg_tmp, SPILL_SLOT_3); // save reg_tmp
-        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &mbr_first_targ[addr_l]);
+        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &cfg_table[block_num].first_targ_pc);
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_ldr(drcontext,
                                                                  opnd_create_reg(reg_first_addr),
                                                                  OPND_CREATE_MEM64(reg_tmp, 0)));
@@ -1113,9 +1093,8 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         dr_restore_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2);
         dr_restore_reg(drcontext, bb, last_inst, reg_tmp, SPILL_SLOT_3);
 #endif
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_mbr, false, 3,
+        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_mbr, false, 2,
                              OPND_CREATE_INT(block_num),
-                             OPND_CREATE_INT(addr_l),
                              target_opnd);
 #ifdef JUMP_MBR
         /* create jmp */
@@ -1127,7 +1106,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         /* insert first_targ_label */
         instrlist_meta_preinsert(bb, last_inst, first_targ_label);
         /* increment the first target counter (targ of my_je) */
-        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_first_addr), (uint64_t) &cfg_table[block_num].first_targ);
+        instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_first_addr), (uint64_t) &cfg_table[block_num].first_targ_count);
         mem = OPND_CREATE_MEM64(reg_first_addr, 0); // set addr opnd for counter
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_ldr(drcontext, opnd_create_reg(reg_tmp), mem));
         instrlist_meta_preinsert(bb, last_inst, INSTR_CREATE_add(drcontext,
