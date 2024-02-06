@@ -12,8 +12,9 @@ struct graph_node {
     address addr;
     graph_id inlined_children[INLINED_CHILDREN] = { GRAPH_INVALID, GRAPH_INVALID };
     vector<graph_id> children;
+    cfg_node *node;
 
-    graph_node(address addr) : addr(addr) {}
+    graph_node(address addr, cfg_node *node) : addr(addr), node(node) {}
 
     void add_child(const graph_id id) {
         bool found(false);
@@ -92,7 +93,7 @@ graph reverse_graph(const graph& cfg) {
     graph recfg;
     recfg.reserve(cfg.size());
     for (const graph_node &node : cfg) {
-        recfg.emplace_back(node.addr);
+        recfg.emplace_back(node.addr, node.node);
     }
     graph_id id(0);
     for (const graph_node &node : cfg) {
@@ -105,15 +106,15 @@ graph reverse_graph(const graph& cfg) {
     return recfg;
 }
 
-pair<graph, map<address, graph_id>> create_graph(const dycfg &cfg) {
+pair<graph, map<address, graph_id>> create_graph(const dycfg &cfg, dycfg &true_cfg) {
     pair<graph, map<address, graph_id>> ret;
     graph &graph = ret.first;
     map<address, graph_id> &node_map = ret.second;
     graph.reserve(cfg.size());
     graph_id id(0);
-    for (auto itr: cfg) {
+    for (auto &itr: cfg) {
         node_map[itr.first] = id;
-        graph.emplace_back(itr.first);
+        graph.emplace_back(itr.first, &true_cfg.at(itr.first));
         auto &node = graph.at(id);
         auto child_count = itr.second.child.size();
         node.children.reserve(child_count > INLINED_CHILDREN ? child_count - INLINED_CHILDREN : 0);
@@ -135,14 +136,15 @@ dycfg cut_ret_and_link_next(const dycfg& cfg) {
     dycfg cut_cfg;
     for (auto itr: cfg) {
         cut_cfg[itr.first] = itr.second;
-        if (cut_cfg[itr.first].is_ret) { // func return
-            cut_cfg[itr.first].child.clear(); // cut the edge
+        auto &node = cut_cfg.at(itr.first);
+        if (node.is_ret) { // func return
+            node.child.clear(); // cut the edge
         }
-        if (cut_cfg[itr.first].is_call) { // func call
+        if (node.is_call && !node.is_tail_call) { // func call
             address key(itr.first.first, itr.second.call_return_addr);
             if (cfg.count(key) > 0) {
                 // link the edge with next inst if the next inst will be executed
-                cut_cfg[itr.first].child[key] = cut_cfg[itr.first].count;
+                node.child[key] = node.count;
             }
         }
     }
@@ -153,48 +155,51 @@ dycfg cut_func_call_and_link(const dycfg& cfg) {
     dycfg cut_cfg;
     for (auto itr: cfg) {
         cut_cfg[itr.first] = itr.second;
-        if (cut_cfg[itr.first].is_call) { // func call
-            cut_cfg[itr.first].child.clear(); // cut the edge
-            address key(itr.first.first,itr.second.call_return_addr);
-            if (cfg.count(key) > 0) // inst after func call exists
-                cut_cfg[itr.first].child[key] = cut_cfg[itr.first].count; // link nodes before and after the func call
-        }
-        if (cut_cfg[itr.first].is_ret) { // func return
-            cut_cfg[itr.first].child.clear(); // cut the edge
-        }
+        auto &node = cut_cfg.at(itr.first);
+        if (node.is_call || node.is_ret)
+            node.child.clear(); // cut the edge
+        if (node.is_ret || node.is_tail_call) continue;
+        address key(itr.first.first,itr.second.call_return_addr);
+        if (cfg.count(key) > 0) // inst after func call exists
+            node.child[key] = node.count; // link nodes before and after the func call
     }
     return cut_cfg;
 }
 
-int extract_loops(const dycfg& cfg, const address &cfg_entry, list<loop>& all_loops) {
+void extract_loops_and_nesting(dycfg& cfg, const address &cfg_entry, list<loop>& all_loops) {
+    const graph_id size = cfg.size();
     // cut edge from ret inst to its successor
-    const auto cut_ret_result = create_graph(cut_ret_and_link_next(cfg));
+    const auto cut_ret_result = create_graph(cut_ret_and_link_next(cfg), cfg);
     const auto &cut_ret = cut_ret_result.first;
     const auto &graph_map = cut_ret_result.second;
     const auto entry = graph_map.at(cfg_entry);
     // cut edges from ret and call instructions
-    const auto &cut_call = create_graph(cut_func_call_and_link(cfg)).first;
+    const auto &cut_call = create_graph(cut_func_call_and_link(cfg), cfg).first;
     // do dfs from entry node
     const auto reachable_from_entry = DFS(entry, GRAPH_INVALID, cut_ret);
 
     vector<list<pair<graph_id, graph_id>>> back_edges;
-    back_edges.resize(cut_ret.size());
+    back_edges.resize(size);
+    // 2d-array of dominances -> if (dominates[x][y]) then node x dominates node y
+    vector<vector<bool>> dominates;
+    dominates.resize(size);
+    for (auto &itr: dominates) itr.resize(size);
     // for each node id, find all nodes that are dominated by id
 #ifndef SERIAL
 #pragma omp parallel for
 #endif
-    for (graph_id id = 0; id < reachable_from_entry.size(); id++) {
+    for (graph_id id = 0; id < size; id++) {
         if (!reachable_from_entry.at(id)) continue;
         // remove id and do dfs from entry node
         const auto reachable_without_id = DFS(entry, id, cut_ret);
         // do dfs from id but without calls
         const auto reachable_without_call = DFS(id, GRAPH_INVALID, cut_call);
-
-        for (graph_id sub_id = 0; sub_id < reachable_from_entry.size(); sub_id++) {
+        for (graph_id sub_id = 0; sub_id < size; sub_id++) {
             // node should be reachable
             if (!reachable_from_entry.at(sub_id)) continue;
             // it should not be reachable without going through id (id dominates sub_id).
             if (reachable_without_id.at(sub_id)) continue;
+            dominates.at(id).at(sub_id) = true;
             // check it's still reachable without calls (no cross-function loops).
             if (!reachable_without_call.at(sub_id)) continue;
             // check if sub_id have an edge to its dominator
@@ -207,12 +212,31 @@ int extract_loops(const dycfg& cfg, const address &cfg_entry, list<loop>& all_lo
         }
     }
 
+    // compute dominance tree
+#ifndef SERIAL
+#pragma omp parallel for
+#endif
+    for (graph_id id = 0; id < size; id++) {
+        if (!reachable_from_entry.at(id)) continue;
+        graph_id candidate = GRAPH_INVALID;
+        for (graph_id parent = 0; parent < size; parent++) {
+            if (id == parent) continue;
+            if (!dominates.at(parent).at(id)) continue;
+            if (candidate == GRAPH_INVALID || dominates.at(candidate).at(parent)) {
+                candidate = parent;
+                continue;
+            }
+        }
+        if (candidate == GRAPH_INVALID) continue;
+        cut_ret.at(id).node->immediate_dominator = cut_ret.at(candidate).addr;
+    }
+
     // find loops
     const auto cut_call_rev = reverse_graph(cut_call);
 
     for (size_t i = 0; i < back_edges.size(); i++) {
         for (auto itr : back_edges.at(i)) {
-            loop tmp;
+            loop tmp{};
             tmp.addr.head = cut_call_rev.at(itr.first).addr;
             tmp.addr.tail = cut_call_rev.at(itr.second).addr;
             if (itr.first != itr.second) { // loop has multiple blocks
@@ -228,6 +252,4 @@ int extract_loops(const dycfg& cfg, const address &cfg_entry, list<loop>& all_lo
             all_loops.push_back(tmp);
         }
     }
-
-    return 0;
 }

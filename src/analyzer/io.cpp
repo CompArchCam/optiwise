@@ -17,8 +17,6 @@ using namespace std;
 static vector<app_module> modules;
 static uint64_t total_cycles = 0;
 
-static shared_ptr<string> no_function = make_shared<string>("NA");
-
 parse_error::parse_error(const std::string &msg, const std::string &file, unsigned line)
         : std::runtime_error(msg), file(file), line(line) {
     ostringstream os;
@@ -384,14 +382,16 @@ void read_perf_result(
 
         // push value to the extra map for func call
         set<function *> unique_queue;
+        if (result.line && result.line->func)
+            unique_queue.insert(result.line->func.get());
         for (auto j: event.stack_trace) {
             auto fline = objdump_result.find(j.addr);
             objdump_line *line = fline != objdump_result.end() ? &fline->second : nullptr;
             /* if sample func name is different with the recursive func name */
             if (!line || !line->func) {
 
-            } else if (unique_queue.count(line->func) == 0) {
-                unique_queue.insert(line->func);
+            } else if (unique_queue.count(line->func.get()) == 0) {
+                unique_queue.insert(line->func.get());
             } else {
                 continue;
             }
@@ -406,7 +406,33 @@ void read_perf_result(
             sample.cpu_cycles += event.cpu_cycles;
             sample.samples += 1;
         }
-        unique_queue.clear();
+
+        for (auto func : set<function *>(unique_queue)) {
+            address current = func->immediate_return;
+            size_t i = 0;
+            while (current.first != 0) {
+                i++;
+                if (i == objdump_result.size()) throw runtime_error("Infinite loop detected");
+                auto n = objdump_result.find(current);
+                if (n == objdump_result.end()) break;
+                auto &node = n->second;
+                if (!node.func) break;
+                if (unique_queue.count(node.func.get()) == 0) {
+                    unique_queue.insert(node.func.get());
+
+                    if (func_sample_table.count(current) == 0) {
+                        func_sample_table[current] = {
+                            .cpu_cycles = 0,
+                            .samples = 0,
+                        };
+                    }
+                    auto &sample = func_sample_table.at(current);
+                    sample.cpu_cycles += event.cpu_cycles;
+                    sample.samples += 1;
+                }
+                current = node.func->immediate_return;
+            }
+        }
     } // end for
 }
 
@@ -462,7 +488,8 @@ static void parse_symbol_line(
         const string &filename,
         unsigned lineno,
         const string &asm_line,
-        map<string, map<uint64_t, pair<function *, uint64_t>>> &symbol_table,
+        app_module_id current_module,
+        map<string, map<uint64_t, pair<shared_ptr<function>, uint64_t>>> &symbol_table,
         bool dynamic
 ) {
     // asm_line looks like e.g.
@@ -500,7 +527,8 @@ static void parse_symbol_line(
     // skip to the first char of the name.
     char first;
     sss >> first;
-    function *f = new function();
+    shared_ptr<function> f(new function{});
+    f->entry = address(current_module, addr);
     f->name = asm_line.substr(size_t(sss.tellg())-1);
     /* strip non-name prefixes that sometimes are present */
     const size_t name_space = f->name.find(' ');
@@ -532,7 +560,7 @@ static void parse_disassembly_line(
         const string &asm_line,
         objdump_table& objdump_result,
         app_module_id current_module,
-        const map<uint64_t, pair<function *, uint64_t>> &symtab,
+        const map<uint64_t, pair<shared_ptr<function>, uint64_t>> &symtab,
         shared_ptr<string> &inlined_func_name,
         shared_ptr<source_line> &source
 ) {
@@ -551,16 +579,16 @@ static void parse_disassembly_line(
 
         auto symbol = symtab.upper_bound(addr);
         if (symbol != symtab.begin()) symbol--;
-        function *func = nullptr;
+        shared_ptr<function> func = nullptr;
         if (symbol != symtab.end()) {
             if (symbol->second.second == 0 || addr - symbol->first < symbol->second.second) {
                 func = symbol->second.first;
             } else if (symbol->second.second != 0 &&  addr - symbol->first == symbol->second.second) {
-                inlined_func_name = func ? make_shared<string>(func->name) : no_function;
+                inlined_func_name = nullptr;
                 source.reset();
             }
             if (symbol->first == addr) {
-                inlined_func_name = func ? make_shared<string>(func->name) : no_function;
+                inlined_func_name = func ? make_shared<string>(func->name) : nullptr;
                 source.reset();
             }
         }
@@ -574,7 +602,7 @@ static void parse_disassembly_line(
         objdump_result[key] = objdump_line{
             .disassembly = disassembly,
             .func = func,
-            .inlined_func_name = inlined_func_name,
+            .inlined_func_name = nullptr,
             .source = source,
         };
     } else if (asm_line.size() > 3 && asm_line.substr(asm_line.size() - 3, 3) == "():") {
@@ -610,11 +638,11 @@ void read_disassembly(string filename, objdump_table& objdump_result){
     }
     /* get inst name and address */
     string asm_line;
-    shared_ptr<string> inlined_func_name = no_function;
+    shared_ptr<string> inlined_func_name = nullptr;
     shared_ptr<source_line> source(nullptr);
-    map<string, map<uint64_t, pair<function *, uint64_t>>> symbol_table;
-    const map<uint64_t, pair<function *, uint64_t>> empty_symtab;
-    const map<uint64_t, pair<function *, uint64_t>> *current_symtab;
+    map<string, map<uint64_t, pair<shared_ptr<function>, uint64_t>>> symbol_table;
+    const map<uint64_t, pair<shared_ptr<function>, uint64_t>> empty_symtab;
+    const map<uint64_t, pair<shared_ptr<function>, uint64_t>> *current_symtab;
     current_symtab = &empty_symtab;
     bool ph_last_load = false;
     uint64_t ph_off = 0;
@@ -653,7 +681,7 @@ void read_disassembly(string filename, objdump_table& objdump_result){
             const auto table = symbol_table.find(section);
             current_symtab = table != symbol_table.end() ?
                 &table->second : &empty_symtab;
-            inlined_func_name = no_function;
+            inlined_func_name = nullptr;
             source.reset();
             continue;
         } else if (asm_line.substr(0, 13) == "SYMBOL TABLE:") {
@@ -682,7 +710,7 @@ void read_disassembly(string filename, objdump_table& objdump_result){
         case parser_state::in_symbol_table:
         case parser_state::in_symbol_table_dynamic:
             parse_symbol_line(
-                    filename, lineno, asm_line, symbol_table,
+                    filename, lineno, asm_line, current_module, symbol_table,
                     state == parser_state::in_symbol_table_dynamic
             );
             break;
@@ -820,7 +848,7 @@ void read_cfg(
                 throw parse_error("multiple entry points in CFG", filename, lineno);
             entry_found = true;
         } else if (line[0] != '\t') { // this is a cfg node
-            cfg_node tmp;
+            cfg_node tmp{};
             string end_inst;
             line_stream >> start_addr
                         >> dec >> tmp.count >> tmp.callee_instcount >> end_inst;
@@ -891,7 +919,8 @@ void read_cfg(
 
     // find entry node of cfg
     if (entry_found) {
-        entry.first = module_map[entry.first];
+        entry.first = module_map.at(entry.first);
+        cfg.at(entry).is_function_entry = true;
     } else {
         throw parse_error("failed to find the entry of cfg", filename, lineno);
     }
