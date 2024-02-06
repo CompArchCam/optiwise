@@ -194,6 +194,7 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
     cout << "generate loop statistics..." << endl;
     /* accumulate block statistics into cfg */
     for (auto &itr: cfg) {
+        auto &block_addr = itr.first;
         auto &block = itr.second;
         uint64_t samples = 0;
         uint64_t cpu_cycles = 0;
@@ -212,11 +213,6 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
             cpu_cycles += prof.cpu_cycles;
             inst_retired += prof.execution_count;
             // check if there are extra samples of the inst caused by func call
-            if (func_sample_table.count(addr) > 0) {
-                const auto &func_sample = func_sample_table.at(addr);
-                samples += func_sample.samples;
-                cpu_cycles += func_sample.cpu_cycles;
-            }
             if (remaining == 0 && prof.line) {
                 block.last_inlined_func_name = prof.line->inlined_func_name;
             }
@@ -227,6 +223,12 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
                 auto &line_set = file_map[*source->filename];
                 line_set.insert(source->line);
             }
+        }
+        const auto func_sample_find = func_sample_table.find(address(block_addr.first, block.call_return_addr));
+        if (func_sample_find != func_sample_table.cend()) {
+            const auto &func_sample = func_sample_find->second;
+            samples += func_sample.samples;
+            cpu_cycles += func_sample.cpu_cycles;
         }
         // check if there are extra execount of the inst caused by func call
         if (block.is_call) {
