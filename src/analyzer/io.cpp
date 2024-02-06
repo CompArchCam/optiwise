@@ -691,14 +691,22 @@ void read_disassembly(string filename, objdump_table& objdump_result){
     asm_code.close();
 }
 
+bool has_keyword(const string &cpp_source_line, const string &keyword) {
+    size_t pos = cpp_source_line.find(keyword);
+    if (pos == string::npos) return false;
+    if (pos > 0 && isalnum(cpp_source_line.at(pos))) return false;
+    if (pos < cpp_source_line.length() - keyword.length() &&
+            isalnum(cpp_source_line.at(pos + keyword.length()))) return false;
+    return true;
+}
+
 bool is_loop(const string &cpp_source_line) {
-    return
-        cpp_source_line.find("for") != size_t(-1) ||
-        cpp_source_line.find("while") != size_t(-1) ||
-        cpp_source_line.find("do") != size_t(-1) ||
+    return has_keyword(cpp_source_line, "for") ||
+        has_keyword(cpp_source_line, "while") ||
+        has_keyword(cpp_source_line, "do") ||
         /* try to catch macros */
-        cpp_source_line.find("FOR") != size_t(-1) ||
-        cpp_source_line.find("WHILE") != size_t(-1) ||
+        has_keyword(cpp_source_line, "FOR") ||
+        has_keyword(cpp_source_line, "WHILE") ||
         0;
 }
 
