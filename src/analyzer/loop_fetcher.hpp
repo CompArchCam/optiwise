@@ -3,6 +3,6 @@
 
 #include "support.hpp"
 
-int extract_loops(const dycfg& cfg, const address &entry, list<loop>& all_loops);
+void extract_loops_and_nesting(dycfg& cfg, const address &entry, list<loop>& all_loops);
 
 #endif

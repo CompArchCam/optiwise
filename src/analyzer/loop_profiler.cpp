@@ -11,11 +11,14 @@
 #include "support.hpp"
 #include "loop_fetcher.hpp"
 
-void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result);
+func_table detect_functions_and_calls(
+        dycfg &cfg, objdump_table &objdump_result, address entry_point
+);
+void extract_function_nesting(func_table &functions, dycfg &cfg);
 void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loop> &all_loops,
                              func_sample &func_sample_table, source_table& objdump_source);
 void guess_loop_source_lines(
-        loop &loop, const function *loop_func,
+        loop &loop, const shared_ptr<function> loop_func,
         const map<string, map<string, set<int>>> &source_line_map,
         const source_table &objdump_source
 );
@@ -78,7 +81,14 @@ int inner_main(int argc, char **argv) {
 
     /* Spot missing functions */
     cout << "Info: Detecting functions..." << endl;
-    detect_functions_and_calls(cfg, objdump_result);
+    auto functions = detect_functions_and_calls(cfg, objdump_result, entry_node);
+
+    list<loop> all_loops;
+    cout << "Info: Finding loops..." << endl;
+    extract_loops_and_nesting(cfg, entry_node, all_loops);
+
+    cout << "Info: Finding function nesting..." << endl;
+    extract_function_nesting(functions, cfg);
 
     /* read data from txt */
     inst_table profiling_result;
@@ -89,10 +99,6 @@ int inner_main(int argc, char **argv) {
     /* read instruction execution count from DynamoRio output */
     cout << "Info: Writing per instruction statistics..." << endl;
     write_exe_count(argv[4], cfg, profiling_result, objdump_result);
-
-    list<loop> all_loops;
-    cout << "Info: Finding loops..." << endl;
-    extract_loops(cfg, entry_node, all_loops);
 
     cout << "Info: Aggregating loop statistics..." << endl;
     generate_loop_statistics(profiling_result, cfg, all_loops,
@@ -105,14 +111,17 @@ int inner_main(int argc, char **argv) {
     return 0;
 } // end main()
 
-void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result) {
+func_table detect_functions_and_calls(
+        dycfg &cfg, objdump_table &objdump_result, address entry_point
+) {
     // algorithm:
     // 1) look for calls, any call target is a function
     // 2) given the list of functions, any jump that crosses a function is a call
     // 3) goto 1 if any new functions were discovered
     bool discovery = true;
-    map<address, function *> functions;
-    function *current_func = nullptr;
+    map<address, shared_ptr<function>> functions;
+    shared_ptr<function> current_func = nullptr;
+    functions[entry_point] = nullptr;
     for (const auto &itr: objdump_result) {
         const auto &node = itr.second;
         if (current_func != node.func) {
@@ -125,13 +134,15 @@ void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result) {
         for (auto &itr: cfg) {
             const auto &addr = itr.first;
             auto &node = itr.second;
+            node.is_function_entry = functions.count(addr) > 0;
             // detect calls
             if (!node.is_call && !node.is_ret) {
-                for (const auto child: node.child) {
+                for (const auto &child: node.child) {
                     const auto &child_address = child.first;
                     // module crosses are always calls
                     if (child_address.first != addr.first) {
                         node.is_call = true;
+                        node.is_tail_call = true;
                         break;
                     }
                     bool before = child_address.second < addr.second;
@@ -142,18 +153,26 @@ void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result) {
                     if (bound == functions.end()) continue;
                     if (bound->first.first != addr.first) continue;
                     if (before ?
-                            bound->first.second < addr.second :
-                            bound->first.second < child_address.second
+                            bound->first.second <= addr.second :
+                            bound->first.second <= child_address.second
                     ) {
                         node.is_call = true;
+                        node.is_tail_call = true;
                         break;
                     }
                 }
             }
 
             if (node.is_call) {
-                for (const auto child: node.child) {
+                // Treat nodes that don't return in practice as tail calls.
+                if (!node.is_tail_call &&
+                        cfg.count(address(addr.first, node.call_return_addr)) == 0)
+                    node.is_tail_call = true;
+                for (const auto &child: node.child) {
                     const address &child_address = child.first;
+                    // this if statement detects fallthroughs of conditional
+                    // tail calls (if that ever actually happens!)
+                    if (node.is_tail_call && child_address.second == node.call_return_addr) continue;
                     if (functions.count(child_address) == 0) {
                         functions[child_address] = nullptr;
                         discovery = true;
@@ -165,26 +184,92 @@ void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result) {
 
     current_func = nullptr;
     shared_ptr<string> inlined_func_name;
-    shared_ptr<string> new_inlined_func_name;
     for (auto &itr: objdump_result) {
         const auto &addr = itr.first;
         auto &node = itr.second;
-        const auto &f = functions.find(addr);
+        auto f = functions.find(addr);
         if (f != functions.end() && f->second == nullptr) {
-            current_func = new function();
+            current_func.reset(new function{});
+            f->second = current_func;
+            current_func->entry = addr;
             ostringstream os;
 
-            os << 'f' << hex << addr.second;
+            os << "(0x" << hex << addr.second << ")";
             current_func->name = os.str();
-            new_inlined_func_name = make_shared<string>(current_func->name);
         } else if (f != functions.end())
             current_func = f->second;
         if (current_func && node.func != current_func) {
             node.func = current_func;
             if (node.inlined_func_name == inlined_func_name)
-                node.inlined_func_name = new_inlined_func_name;
+                node.inlined_func_name = nullptr;
         } else
             inlined_func_name = node.inlined_func_name;
+    }
+
+    // initialize any null functions.
+    for (auto &itr: functions) {
+        if (itr.second) continue;
+
+        itr.second.reset(new function{});
+        current_func = itr.second;
+        const auto addr = itr.first;
+        current_func->entry = addr;
+        ostringstream os;
+        os << "(0x" << hex << addr.second << ")";
+        current_func->name = os.str();
+    }
+
+    current_func = nullptr;
+    for (auto &itr: cfg) {
+        const auto &addr = itr.first;
+        auto &node = itr.second;
+        const auto f = functions.find(addr);
+        if (f != functions.end())
+            current_func = f->second;
+        node.func = current_func;
+        if (node.is_call) {
+            for (auto &child: node.child) {
+                auto c = functions.find(child.first);
+                if (c == functions.end()) continue;
+                c->second->callsites.insert(addr);
+                if (!current_func) continue;
+                c->second->callers.insert(current_func.get());
+                current_func->callees.insert(c->second.get());
+            }
+        }
+    }
+    return functions;
+}
+
+void extract_function_nesting(func_table &functions, dycfg &cfg) {
+    // for each function, traverse the dominator tree backwards from its entry
+    // node looking for a call site. This call site is thus on the stack
+    // whenever this function is on the stack.
+    for (auto &itr: functions) {
+        auto &func = itr.second;
+        size_t i = 0;
+        bool first = true;
+        address current = func->entry;
+        while (current.first != 0) {
+            auto n = cfg.find(current);
+            if (n == cfg.end()) break;
+            auto &node = n->second;
+            if (!first && !func->immediate_parent) {
+                if (node.func == func) throw runtime_error("Function dominated by itself?");
+                func->immediate_parent = node.func;
+            }
+            if (!first && node.is_call && !node.is_tail_call) {
+                if (node.func == func) throw runtime_error("Function dominated by its own call?");
+                func->immediate_return = address(current.first, node.call_return_addr);
+                break;
+            }
+            first = false;
+            current = node.immediate_dominator;
+            i++;
+            if (i > cfg.size()) {
+                throw runtime_error("Dominator loop.\n");
+            }
+        }
     }
 }
 
@@ -192,7 +277,6 @@ void detect_functions_and_calls(dycfg &cfg, objdump_table &objdump_result) {
 void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loop> &all_loops,
                              func_sample &func_sample_table, source_table& objdump_source)
 {
-    cout << "generate loop statistics..." << endl;
     /* accumulate block statistics into cfg */
     for (auto &itr: cfg) {
         auto &block_addr = itr.first;
@@ -256,13 +340,11 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
     for (auto &itr: all_loops) {
         const auto &prof_head = profiling_result.at(itr.addr.head);
         const auto &prof_tail = profiling_result.at(itr.addr.tail);
-        function *loop_func = itr.func = prof_head.func();
-        function *tail_func = prof_tail.func();
+        shared_ptr<function> loop_func = itr.func = prof_head.func();
+        shared_ptr<function> tail_func = prof_tail.func();
         /* Assume the loop is in the function that the last instruction of the
          * tail block reports itself in. */
         itr.loop_func = cfg.at(itr.addr.tail).last_inlined_func_name;
-        if (!itr.loop_func)
-            itr.loop_func = cfg.at(itr.addr.head).last_inlined_func_name;
         if (!itr.loop_func)
             if (tail_func) itr.loop_func = make_shared<string>(tail_func->name);
         if (!itr.loop_func)
@@ -366,7 +448,7 @@ bool is_header_file(const string &filename) {
 }
 
 void guess_loop_source_lines(
-        loop &loop, const function *loop_func,
+        loop &loop, const shared_ptr<function> loop_func,
         // inlined_func map of filename map of set of source lines.
         const map<string, map<string, set<int>>> &source_line_map,
         const source_table &objdump_source
@@ -446,7 +528,7 @@ inline bool is_subloop(loop l1, loop l2) {
 /* merge all loops in merged_list into a single loop
    and then push the merged loop into all_loops */
 inline void merge_loops(vector<loop> &merged_list, dycfg &cfg, list<loop> &all_loops) {
-    loop merged_loop;
+    loop merged_loop{};
     merged_loop.addr.head = merged_list.front().addr.head;
     merged_loop.addr.tail = merged_list.front().addr.tail;
     uint64_t sum_of_backedge = 0;

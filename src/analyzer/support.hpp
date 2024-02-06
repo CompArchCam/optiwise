@@ -31,8 +31,14 @@ struct back_edge {
     address tail;
 };
 
-struct function {
+struct function { // non-inlined function
+    address entry;
     string name;
+    set<function *> callers;
+    set<function *> callees;
+    set<address> callsites;
+    shared_ptr<function> immediate_parent; // most nested function in which all calls to this function are nested
+    address immediate_return; // most nested return address to which this function must always eventually return
 };
 
 struct source_line {
@@ -49,7 +55,7 @@ struct loop {
     uint64_t size;              // static loop size (inst)
     uint64_t total_iteration;   // sum of all back edge counts
     set<address> loop_body;     // blocks included by this loop
-    function *func;             // non-inlined function that contains the loop
+    shared_ptr<function> func;  // non-inlined function that contains the loop
     shared_ptr<string> loop_func;   // function that contains this loop (inlined).
     shared_ptr<source_line> source; // source code location
     int source_line_count;          // number of source code lines
@@ -69,7 +75,11 @@ struct cfg_node {           // each node is a DynamoRio Block with no overlap
     uint64_t callee_instcount;      // count of instructions executed in functions called from this block
     set<uint64_t> inst_addrs;       // address of each instruction in this block.
     bool is_call;                   // last instruction is a call
+    bool is_tail_call;              // last instruction is a tail call
     bool is_ret;                    // last instruction is a ret
+    bool is_function_entry;         // this is the start of a function
+    shared_ptr<function> func;      // function that contains this block
+    address immediate_dominator;    // idom in a CFG where each 'is_return' is unlinked, but each is_call is linked to the next block
     string callee;                  // callee function name(s) if is_call, otherwise nullptr
     shared_ptr<string> last_inlined_func_name;
     map<address, uint64_t> child;   // child of this node: <start address of a child block, count of entering this block>
@@ -96,7 +106,7 @@ struct sample_point {
 
 struct objdump_line {
     string disassembly;
-    function *func;
+    shared_ptr<function> func;
     shared_ptr<string> inlined_func_name;
     shared_ptr<source_line> source;
 };
@@ -108,10 +118,10 @@ struct processed_perf_result {
     app_module_id mod;
     const objdump_line *line;
     string block_num;
-    function *func() const { return line ? line->func : nullptr; }
+    shared_ptr<function> func() const { return line ? line->func : nullptr; }
     string func_name() const { return line && line->func ? line->func->name : "NA"; }
     string inlined_func_name() const {
-        return line && line->inlined_func_name ? *line->inlined_func_name : "NA";
+        return line && line->inlined_func_name ? *line->inlined_func_name : func_name();
     }
     string disassembly() const { return line ? line->disassembly : "NA"; }
     shared_ptr<source_line> source() const { return line ? line->source : nullptr; }
@@ -120,6 +130,7 @@ struct processed_perf_result {
 typedef map<address, processed_perf_result> inst_table;
 typedef map<address, objdump_line> objdump_table;
 typedef map<string, map<int, pair<string, bool>>> source_table;
+typedef map<address, shared_ptr<function>> func_table;
 typedef map<address, sample_point> func_sample;
 typedef map<address, cfg_node> dycfg;
 
