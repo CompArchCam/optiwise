@@ -153,6 +153,7 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
     static vector<loaded_module> loaded_modules;
     uint64_t sample_address;
     bool have_sample_address = false;
+    bool bad_sample_address = false;
     istringstream ss;
     do {
         if (!fp) return;
@@ -277,6 +278,7 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
                 sample_address += m.offset;
             }
         }
+        bad_sample_address = id == 0 || id == app_module_id(-1);
         perf.emplace_back(Perf_result{
             .addr = make_pair(id, sample_address),
         });
@@ -316,6 +318,9 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
             // first line of first stack trace; add this event to the list
             last_timestamp = timestamp;
             p = &*(perf.end() - 1);
+            if (bad_sample_address && tp.addr.first > 0 && tp.addr.first != app_module_id(-1)) {
+                p->addr = tp.addr;
+            }
         } else {
             p->stack_trace.emplace_back(tp);
         }
