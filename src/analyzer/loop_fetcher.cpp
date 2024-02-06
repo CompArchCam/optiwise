@@ -13,8 +13,9 @@ struct graph_node {
     graph_id inlined_children[INLINED_CHILDREN] = { GRAPH_INVALID, GRAPH_INVALID };
     vector<graph_id> children;
     cfg_node *node;
+    bool is_call;
 
-    graph_node(address addr, cfg_node *node) : addr(addr), node(node) {}
+    graph_node(address addr, cfg_node *node) : addr(addr), node(node), is_call(node->is_call) {}
 
     void add_child(const graph_id id) {
         bool found(false);
@@ -112,22 +113,20 @@ pair<graph, map<address, graph_id>> create_graph(const dycfg &cfg, dycfg &true_c
     map<address, graph_id> &node_map = ret.second;
     graph.reserve(cfg.size());
     graph_id id(0);
-    for (auto &itr: cfg) {
+    for (auto &itr: true_cfg) {
         node_map[itr.first] = id;
-        graph.emplace_back(itr.first, &true_cfg.at(itr.first));
+        graph.emplace_back(itr.first, &itr.second);
         auto &node = graph.at(id);
-        auto child_count = itr.second.child.size();
+        auto child_count = cfg.at(itr.first).child.size();
         node.children.reserve(child_count > INLINED_CHILDREN ? child_count - INLINED_CHILDREN : 0);
         id++;
     }
-    id = 0;
-    for (auto itr: cfg) {
+    for (id = 0; id < graph.size(); id++) {
         auto &node = graph.at(id);
         for (auto child: cfg.at(node.addr).child) {
             if (node_map.count(child.first) > 0)
                 node.add_child(node_map.at(child.first));
         }
-        id++;
     }
     return ret;
 }
@@ -156,8 +155,8 @@ dycfg cut_func_call_and_link(const dycfg& cfg) {
     for (auto itr: cfg) {
         cut_cfg[itr.first] = itr.second;
         auto &node = cut_cfg.at(itr.first);
-        if (node.is_call || node.is_ret)
-            node.child.clear(); // cut the edge
+        if (!node.is_call && !node.is_ret) continue;
+        node.child.clear(); // cut the edge
         if (node.is_ret || node.is_tail_call) continue;
         address key(itr.first.first,itr.second.call_return_addr);
         if (cfg.count(key) > 0) // inst after func call exists
@@ -198,12 +197,14 @@ void extract_loops_and_nesting(dycfg& cfg, const address &cfg_entry, list<loop>&
             // node should be reachable
             if (!reachable_from_entry.at(sub_id)) continue;
             // it should not be reachable without going through id (id dominates sub_id).
-            if (reachable_without_id.at(sub_id)) continue;
+            if (id != entry && reachable_without_id.at(sub_id)) continue;
             dominates.at(id).at(sub_id) = true;
             // check it's still reachable without calls (no cross-function loops).
             if (!reachable_without_call.at(sub_id)) continue;
             // check if sub_id have an edge to its dominator
             const auto &sub_node = cut_ret.at(sub_id);
+            // check it's not recursion
+            if (sub_node.is_call) continue;
             for (auto child : sub_node) {
                 if (child == id) { // back edge exists
                     back_edges.at(id).emplace_back(id, sub_id);
@@ -249,6 +250,7 @@ void extract_loops_and_nesting(dycfg& cfg, const address &cfg_entry, list<loop>&
                 }
             }
             tmp.loop_body.insert(tmp.addr.head);
+            tmp.back_edges.insert(tmp.addr.tail);
             all_loops.push_back(tmp);
         }
     }

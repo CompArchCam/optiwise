@@ -26,6 +26,8 @@ typedef pair<app_module_id, uint64_t> address;
 app_module_id module_add_or_find(const string &path);
 app_module &module_lookup(app_module_id id);
 
+struct loop;
+
 struct back_edge {
     address head;
     address tail;
@@ -34,11 +36,19 @@ struct back_edge {
 struct function { // non-inlined function
     address entry;
     string name;
-    set<function *> callers;
-    set<function *> callees;
+    set<const function *> callers;
+    set<const function *> callees;
     set<address> callsites;
     shared_ptr<function> immediate_parent; // most nested function in which all calls to this function are nested
     address immediate_return; // most nested return address to which this function must always eventually return
+    const loop *immediate_loop; // most nested loop in which all calls to this function occur.
+    size_t length; // in bytes, 0 if unknown
+    // these stats are for samples not otherwise associated with a particular
+    // call site (e.g. due to a tail call)
+    uint64_t callee_samples;        // perf samples
+    uint64_t callee_cycles;         // perf cpu cycles
+    uint64_t callee_instcount;      // count of instructions executed in functions called from this one
+    uint64_t self_instcount;        // count of instructions executed in this function
 };
 
 struct source_line {
@@ -55,11 +65,14 @@ struct loop {
     uint64_t size;              // static loop size (inst)
     uint64_t total_iteration;   // sum of all back edge counts
     set<address> loop_body;     // blocks included by this loop
+    set<address> exclusive_body;// blocks included ONLY by this loop
     shared_ptr<function> func;  // non-inlined function that contains the loop
     shared_ptr<string> loop_func;   // function that contains this loop (inlined).
     shared_ptr<source_line> source; // source code location
     int source_line_count;          // number of source code lines
     set<const loop *> nested_loops; // within the same function only
+    set<address> back_edges;    // address of tall possible tails
+    const loop* parent_loop;    // within same function only
     uint64_t self_samples;      // how many perf samples this loop has not nested in other loops
     uint64_t self_cpu_cycles;   // perf cpu cycles not nested in other loops
     uint64_t self_inst_retired; // inst retired in the loop not nested in other loops
@@ -79,6 +92,7 @@ struct cfg_node {           // each node is a DynamoRio Block with no overlap
     bool is_ret;                    // last instruction is a ret
     bool is_function_entry;         // this is the start of a function
     shared_ptr<function> func;      // function that contains this block
+    const loop *parent_loop;        // most nested loop in which all calls to this function occur.
     address immediate_dominator;    // idom in a CFG where each 'is_return' is unlinked, but each is_call is linked to the next block
     string callee;                  // callee function name(s) if is_call, otherwise nullptr
     shared_ptr<string> last_inlined_func_name;

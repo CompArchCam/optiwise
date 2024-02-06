@@ -241,7 +241,7 @@ if [ "${flag_verbose-}" ]; then
     "$result_dir/count/$name_count" \
     "$result_dir/analyze/$name_analyze/inst.csv" \
     "$result_dir/analyze/$name_analyze/loop.csv" \
-    "$result_dir/analyze/$name_analyze/structure.txt" \
+    "$result_dir/analyze/$name_analyze/structure.yaml" \
   '4<('$zcat "$result_dir/disassemble/$name_disassemble"')'
 fi
 perf script \
@@ -253,6 +253,6 @@ perf script \
   "$result_dir/count/$name_count" \
   "$result_dir/analyze/$name_analyze/inst.csv" \
   "$result_dir/analyze/$name_analyze/loop.csv" \
-  "$result_dir/analyze/$name_analyze/structure.txt" 4<<EOF
+  "$result_dir/analyze/$name_analyze/structure.yaml" 4<<EOF
 $($zcat "$result_dir/disassemble/$name_disassemble")
 EOF

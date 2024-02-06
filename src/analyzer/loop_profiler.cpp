@@ -15,8 +15,10 @@ func_table detect_functions_and_calls(
         dycfg &cfg, objdump_table &objdump_result, address entry_point
 );
 void extract_function_nesting(func_table &functions, dycfg &cfg);
+void compute_function_statistics(func_table &functions, const dycfg &cfg);
 void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loop> &all_loops,
-                             func_sample &func_sample_table, source_table& objdump_source);
+                             func_sample &func_sample_table, source_table& objdump_source,
+                             func_table &functions);
 void guess_loop_source_lines(
         loop &loop, const shared_ptr<function> loop_func,
         const map<string, map<string, set<int>>> &source_line_map,
@@ -96,16 +98,22 @@ int inner_main(int argc, char **argv) {
     cout << "Info: Reading perf result from " << argv[1] << endl;
     read_perf_result(argv[1], objdump_result, profiling_result, func_sample_table);
 
+    cout << "Info: Compute function statistics..." << endl;
+    compute_function_statistics(functions, cfg);
+
     /* read instruction execution count from DynamoRio output */
     cout << "Info: Writing per instruction statistics..." << endl;
     write_exe_count(argv[4], cfg, profiling_result, objdump_result);
 
     cout << "Info: Aggregating loop statistics..." << endl;
     generate_loop_statistics(profiling_result, cfg, all_loops,
-            func_sample_table, objdump_source);
+            func_sample_table, objdump_source, functions);
 
     cout << "Info: Writing per loop statistics..." << endl;
-    write_loop(argv[5], argv[6], all_loops, cfg, profiling_result);
+    write_loop(argv[5], all_loops, cfg, profiling_result);
+
+    cout << "Info: Writing program structure..." << endl;
+    write_structure(argv[6], all_loops, functions, cfg, profiling_result);
     cout << "Info: All tasks complete." << endl;
 
     return 0;
@@ -273,9 +281,54 @@ void extract_function_nesting(func_table &functions, dycfg &cfg) {
     }
 }
 
+void compute_function_statistics(func_table &functions, const dycfg &cfg) {
+    bool change = true;
+    size_t i = 0;
+    for (auto &itr: functions) {
+        auto &func = itr.second;
+        func->self_instcount = 0;
+        func->callee_instcount = 0;
+        for (auto itr2 = cfg.find(func->entry); itr2 != cfg.end(); ++itr2) {
+            auto &block = itr2->second;
+            if (block.func != func) break;
+            func->self_instcount += block.count * block.inst_addrs.size();
+        }
+    }
+
+    while (change) {
+        change = false;
+        for (auto &itr: functions) {
+            auto &func = itr.second;
+            uint64_t callee_instcount = 0;
+            for (auto itr2 = cfg.find(func->entry); itr2 != cfg.end(); ++itr2) {
+                auto &block = itr2->second;
+                if (block.func != func) break;
+                if (!block.is_call) continue;
+                callee_instcount += block.callee_instcount;
+            }
+            if (func->callee_instcount < callee_instcount) {
+                func->callee_instcount = callee_instcount;
+                change = true;
+            }
+            callee_instcount = func->callee_instcount;
+            uint64_t total = func->self_instcount + callee_instcount;
+            if (func->immediate_parent &&
+                    func->immediate_parent->callee_instcount < total) {
+                func->immediate_parent->callee_instcount = total;
+                change = true;
+            }
+        }
+        if (i > functions.size()) {
+            throw runtime_error("Infinite loop detected.\n");
+        }
+        i++;
+    }
+}
+
 /* complete loop info */
 void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loop> &all_loops,
-                             func_sample &func_sample_table, source_table& objdump_source)
+                             func_sample &func_sample_table, source_table& objdump_source,
+                             func_table &functions)
 {
     /* accumulate block statistics into cfg */
     for (auto &itr: cfg) {
@@ -403,7 +456,7 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
     // detect nesting
     for (auto &loop: all_loops) {
         set<address> in_nested;
-        for (const auto &inner: all_loops) {
+        for (auto &inner: all_loops) {
             if (&inner == &loop) continue;
             if (loop.loop_body.count(inner.addr.head) == 0) continue;
             if (loop.loop_body.count(inner.addr.tail) == 0) continue;
@@ -411,6 +464,12 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
             for (const auto &addr: inner.loop_body) {
                 in_nested.insert(addr);
             }
+            // set parent to most nested loop containing it
+            if (inner.parent_loop) {
+                if (inner.parent_loop->loop_body.count(loop.addr.head) == 0) continue;
+                if (inner.parent_loop->loop_body.count(loop.addr.tail) == 0) continue;
+            }
+            inner.parent_loop = &loop;
         }
 
         loop.self_samples = loop.samples;
@@ -418,8 +477,12 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
         loop.self_inst_retired = loop.inst_retired;
         loop.self_size = loop.size;
         for (const auto &addr: loop.loop_body) {
-            if (in_nested.count(addr) == 0) continue;
-            const auto &node = cfg.at(addr);
+            auto &node = cfg.at(addr);
+            if (in_nested.count(addr) == 0) {
+                loop.exclusive_body.insert(addr);
+                node.parent_loop = &loop;
+                continue;
+            }
             loop.self_size -= node.block_size();
             if (profiling_result.count(addr) == 0) continue;
             if (profiling_result.at(addr).func() != loop.func) continue;
@@ -427,6 +490,17 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
             loop.self_cpu_cycles -= node.cpu_cycles;
             loop.self_inst_retired -= node.inst_retired;
         }
+    }
+
+    for (auto &itr: functions) {
+        auto &func = itr.second;
+        address current = func->entry;
+        auto n = cfg.find(current);
+        if (n == cfg.end()) continue;
+        current = n->second.immediate_dominator;
+        auto m = cfg.find(current);
+        if (m == cfg.end()) continue;
+        func->immediate_loop = m->second.parent_loop;
     }
 }
 
@@ -538,6 +612,7 @@ inline void merge_loops(vector<loop> &merged_list, dycfg &cfg, list<loop> &all_l
         for (auto body: i.loop_body) {
             merged_loop.loop_body.insert(body);
         }
+        merged_loop.back_edges.insert(i.addr.tail);
     }
     merged_loop.total_iteration = sum_of_backedge;
     all_loops.push_back(merged_loop);
