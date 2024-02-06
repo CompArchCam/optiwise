@@ -348,12 +348,31 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
     }
 }
 
+// huerisitc
+bool is_header_file(const string &filename) {
+    const size_t len = filename.size();
+    const size_t hpos = filename.rfind(".h"); /* .h, .hpp, etc */
+    if (hpos != string::npos && hpos >= len - 4) return true;
+    const size_t ipos = filename.rfind(".i"); /* .i, .inc, etc */
+    if (ipos != string::npos && ipos >= len - 4) return true;
+    /* look for include as a directory name. */
+    const size_t incpos = filename.find("include");
+    if (incpos != string::npos && incpos > 1 && incpos < len - 1 &&
+            !isalnum(filename.at(incpos - 1)) &&
+            !isalnum(filename.at(incpos + 7)))
+        return true;
+
+    return false;
+}
+
 void guess_loop_source_lines(
         loop &loop, const function *loop_func,
         // inlined_func map of filename map of set of source lines.
         const map<string, map<string, set<int>>> &source_line_map,
         const source_table &objdump_source
 ) {
+    loop.source.reset();
+    loop.source_line_count = 0;
     if (source_line_map.size() == 0) return;
     const string &inlined_func = *loop.loop_func;
     // only consider lines that we believe are associated with the function
@@ -366,26 +385,49 @@ void guess_loop_source_lines(
     // find the first loop in those lines. If we don't find one, just return the
     // full range.
     bool have_loop = false;
+    bool have_header = false;
+    int best_lines = 0;
     for (auto &file: func) {
         const string &filename = file.first;
         const set<int> &lines = file.second;
-        // we don't expect this outer 'file' loop to go round more than once;
-        // that would imply a loop in a function was split across multiple
-        // files.  It's possible in C using the preprocessor, but not likely.
-        loop.source.reset();
+        const bool is_header = is_header_file(filename);
+        bool have_this_loop = false;
+        shared_ptr<source_line> current_match;
+        int current_line_count = 0;
+        int current_lines = 0;
         for (int line: lines) {
             auto sourceline = objdump_source.at(filename).at(line);
             bool is_loop = sourceline.second;
-            if (!loop.source || (!have_loop && is_loop)) {
-                loop.source_line_count = 0;
-                loop.source.reset(new source_line{
+            if (!current_match) {
+                current_match.reset(new source_line{
                     .filename = make_shared<string>(filename), .line = line
                 });
-                have_loop = is_loop;
             }
-            loop.source_line_count++;
+            if (!have_this_loop && is_loop) {
+                current_match->line = line;
+                current_line_count = 1;
+                current_lines = 0;
+                have_this_loop = true;
+            }
+            if (current_match)
+                if (current_line_count < line - current_match->line + 1)
+                    current_line_count = line - current_match->line + 1;
+            current_lines++;
         }
-        if (have_loop) break;
+        // pick the longest loop possible match we have that doesn't seem to be
+        // in a header file.
+        if (current_match && (
+                    !loop.source
+                    || (!have_loop && have_this_loop)
+                    || (have_loop == have_this_loop && best_lines < current_lines)
+                    || (have_loop == have_this_loop && have_header && best_lines == current_lines && !is_header)
+        )) {
+            loop.source = current_match;
+            loop.source_line_count = current_line_count;
+            have_loop = have_this_loop;
+            best_lines = current_lines;
+            have_header = is_header;
+        }
     }
 }
 
