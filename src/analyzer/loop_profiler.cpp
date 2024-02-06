@@ -59,6 +59,7 @@ int inner_main(int argc, char **argv) {
         return 1;
     }
 
+    module_add_or_find("<none>");
 
     /* read the instruction name from objdump output */
     objdump_table objdump_result;
