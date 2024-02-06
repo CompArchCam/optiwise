@@ -31,6 +31,16 @@ void write_exe_count(
         const dycfg &cfg,
         inst_table& profiling_result,
         const objdump_table& objdump_result);
-void write_loop(string loops_csv_path, string loop_body_path, list<loop> &all_loops, dycfg &cfg, inst_table& profiling_result);
+void write_loop(
+        const string &loops_csv_path,
+        const list<loop> &all_loops,
+        const dycfg &cfg,
+        const inst_table& profiling_result);
+void write_structure(
+        const string &path,
+        const list<loop> &all_loops,
+        const func_table &functions,
+        const dycfg &cfg,
+        const inst_table &profiling_result);
 
 #endif /* ifndef IO_HPP_ */

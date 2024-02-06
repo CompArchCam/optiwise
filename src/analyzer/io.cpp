@@ -432,6 +432,15 @@ void read_perf_result(
                 }
                 current = node.func->immediate_return;
             }
+            auto parent = func->immediate_parent;
+            while (parent) {
+                if (unique_queue.count(parent.get()) == 0) {
+                    parent->callee_samples++;
+                    parent->callee_cycles += event.cpu_cycles;
+                    unique_queue.insert(parent.get());
+                }
+                parent = parent->immediate_parent;
+            }
         }
     } // end for
 }
@@ -549,6 +558,7 @@ static void parse_symbol_line(
             if (!not_hex) f->name = f->name.substr(name_space + 1);
         }
     }
+    f->length = size;
     // prefer functions with size if possible
     if (symbol_table[section].count(addr) > 0 && size == 0) return;
     symbol_table[section][addr] = make_pair(f, size);
@@ -991,20 +1001,19 @@ void write_exe_count(
     myfile.close();
 }
 
-void write_loop(string loops_csv_path, string loop_body_path, list<loop> &all_loops, dycfg &cfg, inst_table& profiling_result) {
+void write_loop(
+        const string &loops_csv_path,
+        const list<loop> &all_loops,
+        const dycfg &cfg,
+        const inst_table& profiling_result) {
     /* write loop info to csv */
-    ofstream myfile, bodyfile;
+    ofstream myfile;
     myfile.open(loops_csv_path);
     if (!myfile.is_open()) {
         throw runtime_error("failed to open loops csv file!");
     }
-    bodyfile.open(loop_body_path);
-    if (!bodyfile.is_open()) {
-        throw runtime_error("failed to open loops body file!");
-    }
 
     myfile << "file,head_addr,tail_addr,size,self_size,iters,invocs,iter_per_invoc,samples,cycles,insts,cyc_per_iter,inst_per_iter,cover,IPC,self_cyc_per_iter,self_inst_per_iter,self_cover,self_IPC,loop_func,source\n";
-    app_module_id current_module(-1);
     for (auto itr : all_loops) {
         const app_module &mod = module_lookup(itr.addr.head.first);
         auto invocations = itr.count - itr.total_iteration;
@@ -1042,31 +1051,299 @@ void write_loop(string loops_csv_path, string loop_body_path, list<loop> &all_lo
             myfile << "\"\n";
         } else
             myfile << "?:?\"\n";
-
-        while (current_module != itr.addr.head.first) {
-            current_module++;
-            const app_module &cmod = module_lookup(current_module);
-            bodyfile << "Module " << dec << current_module << ' ' << cmod.path << '\n';
-        }
-        bodyfile << hex << itr.addr.head.second << ", "
-                 << itr.addr.tail.second << ", "
-                 << dec << itr.loop_body.size() << '\n';
-        bodyfile << '\t';
-        string func_in_loop;
-        for (auto body: itr.loop_body) {
-            bodyfile << dec << body.first << ' ' << hex << body.second << ',';
-            if (!cfg[body].callee.empty()) {
-                func_in_loop += cfg[body].callee;
-            }
-        }
-        bodyfile << "\n\t" << func_in_loop;
-        bodyfile << "\n\n";
-    }
-    while (current_module + 1 != modules.size()) {
-        current_module++;
-        const app_module &cmod = module_lookup(current_module);
-        bodyfile << "Module " << dec << current_module << ' ' << cmod.path << '\n';
     }
     myfile.close();
-    bodyfile.close();
+}
+
+static string yaml_escape(const string &input) {
+    auto i = input.find('\'');
+    if (i == string::npos) return input;
+    string result;
+    auto start = 0;
+    while (i != string::npos) {
+        result.append(input, start, i + 1 - start);
+        result.push_back('\'');
+        start = i + 1;
+        i = input.find('\'', start);
+    }
+    return result;
+}
+
+static void write_structure_from(
+        ofstream &myfile,
+        size_t level,
+        shared_ptr<const function> parent,
+        const loop *parent_loop,
+        const list<loop> &all_loops,
+        const func_table &functions,
+        const dycfg &cfg,
+        const inst_table &profiling_result) {
+    if (level > cfg.size()) throw runtime_error("infinite loop detected");
+    struct node_stats {
+        shared_ptr<const function> func;
+        const loop *node_loop;
+        uint64_t cycles;
+        uint64_t samples;
+        uint64_t inst_retired;
+        uint64_t executions;
+        size_t length;
+        set<address> exclusive_body;
+    };
+    vector<node_stats> top_stats;
+    set<pair<uint64_t, size_t>> top_nodes;
+    for (auto &itr: functions) {
+        auto function = itr.second;
+        if (!function) throw runtime_error("nullptr in function table");
+        if (function->immediate_parent != parent) continue;
+        if (parent_loop !=
+                ((function->immediate_loop &&
+                function->immediate_loop->func == parent) ?
+                function->immediate_loop : nullptr)) continue;
+        top_stats.emplace_back(node_stats{
+                .func = function,
+                .cycles = function->callee_cycles,
+                .samples = function->callee_samples,
+                .inst_retired = function->callee_instcount + function->self_instcount,
+                .length = function->length});
+        node_stats &s = top_stats.end()[-1];
+        bool first = true;
+        for (auto itr2 = cfg.find(function->entry); itr2 != cfg.end(); ++itr2) {
+            auto &block = itr2->second;
+            if (block.func != function) break;
+            s.cycles += block.cpu_cycles;
+            s.samples += block.samples;
+            if (s.length < block.call_return_addr - function->entry.second)
+                s.length = block.call_return_addr - function->entry.second;
+            if (!block.parent_loop)
+                s.exclusive_body.insert(itr2->first);
+            if (!first) continue;
+            first = false;
+            s.executions = block.count;
+        }
+        if (s.executions == 0) continue;
+        top_nodes.insert(make_pair(~s.cycles, top_stats.size() - 1));
+    }
+    for (auto &l: all_loops) {
+        if (l.func != parent) continue;
+        if (l.parent_loop != parent_loop) continue;
+        top_stats.emplace_back(node_stats{
+                .node_loop = &l,
+                .cycles = l.cpu_cycles,
+                .samples = l.samples,
+                .inst_retired = l.inst_retired,
+                .executions = l.count - l.total_iteration,
+                .exclusive_body = l.exclusive_body});
+        node_stats &s = top_stats.end()[-1];
+        if (s.executions == 0) continue;
+        top_nodes.insert(make_pair(~s.cycles, top_stats.size() - 1));
+    }
+
+    if (top_nodes.size() == 0) return;
+    if (level > 0)
+        myfile << string(level * 3 - 2, ' ') << "  nodes:\n";
+    const string indent(level * 3 + 1, ' ');
+    for (auto &itr: top_nodes) {
+        auto stats = top_stats.at(itr.second);
+        float ipc = stats.cycles == 0 ? 0 : (float)stats.inst_retired / stats.cycles;
+        float cover = total_cycles == 0 ? 0.0 : ((float)stats.cycles / total_cycles);
+        if (stats.func) {
+            auto func = stats.func;
+            bool is_indirect = parent && (
+                func->callers.size() != 1 ||
+                func->callers.count(parent.get()) == 0);
+            if (is_indirect)
+                myfile << indent << "# skipped intermediate calls and loops\n";
+            myfile << indent << "- function: '" << yaml_escape(func->name) << "'\n";
+            myfile << indent << "  address: {"
+                << "module: " << dec << func->entry.first
+                << ", offset: 0x" << hex << func->entry.second
+                << ", length: 0x" << hex << stats.length
+                << "}\n";
+            myfile << indent << "  invocations: " << dec << stats.executions << "\n";
+            if (stats.samples > 0)
+                myfile << indent << "  stats-inclusive: {"
+                    << "ipc: " << dec << fixed << showpoint << setprecision(2) << ipc
+                    << ", cover: " << dec << fixed << showpoint << setprecision(3) << cover
+                    << ", cycles: " << dec << stats.cycles
+                    << ", samples: " << dec << stats.samples
+                    << "}\n";
+            myfile << indent << "  blocks-exclusive: [";
+            bool first_block = true;
+            for (auto &block: stats.exclusive_body) {
+                if (!first_block) myfile << ", ";
+                myfile << "0x" << hex << block.second;
+                first_block = false;
+            }
+            myfile << "]\n";
+            map<const function *, uint64_t> call_counts;
+            map<const function *, map<address, uint64_t>> call_sites;
+            for (auto &addr: func->callsites) {
+                auto f = cfg.find(addr);
+                if (f == cfg.end()) throw runtime_error("Call site not found");
+                const auto &block = f->second;
+                const function *caller = block.func.get();
+                if (!call_counts.count(caller))
+                    call_counts[caller] = 0;
+                uint64_t count = 0;
+                if (block.child.count(func->entry) > 0)
+                    count = block.child.at(func->entry);
+                call_counts.at(caller) += count;
+                call_sites[caller][addr] = count;
+            }
+            set<pair<uint64_t, const function *>> sorted_call_counts;
+            for (auto &itr : call_counts) {
+                sorted_call_counts.insert(make_pair(~itr.second, itr.first));
+            }
+            myfile << indent << "  callers: [";
+            bool first_caller = true;
+            for (auto &itr : sorted_call_counts) {
+                const function *caller = itr.second;
+                if (!first_caller) myfile << ", ";
+                if (!caller)
+                    myfile << "{function: '(unknown)'";
+                else
+                    myfile << "{function: {module: " << dec << caller->entry.first
+                        << ", offset: 0x" << hex << caller->entry.second
+                        << "}";
+                myfile << ", sites: [";
+                bool first_site = true;
+                for (auto &itr2: call_sites.at(caller)) {
+                    const address &addr = itr2.first;
+                    uint64_t count = itr2.second;
+                    if (!first_site) myfile << ", ";
+                    myfile << "{offset: 0x" << hex << addr.second
+                        << ", count: "  << dec << count << "}";
+                    first_site = false;
+                }
+                myfile << "]}";
+                first_caller = false;
+            }
+            myfile << "]\n";
+            myfile << indent << "  callees: [";
+            bool first_callee = true;
+            for (const function *callee : func->callees) {
+                if (!first_callee) myfile << ", ";
+                if (!callee)
+                    myfile << "'(unknown)'";
+                else
+                    myfile << "{module: " << dec << callee->entry.first
+                        << ", offset: 0x" << hex << callee->entry.second
+                        << "}";
+                first_callee = false;
+            }
+            myfile << "]\n";
+            write_structure_from(myfile, level + 1, func, nullptr, all_loops, functions, cfg, profiling_result);
+        } else { // loop
+            auto &loop = *stats.node_loop;
+            float iter_per_invoc = stats.executions <= 0 ? 0.0 : ((float)loop.count / stats.executions);
+            float cyc_per_iter = loop.count == 0 ? 0.0 : ((float)loop.cpu_cycles / loop.count);
+            float inst_per_iter = loop.count == 0 ? 0.0 : ((float)loop.inst_retired / loop.count);
+            float self_cover = total_cycles == 0 ? 0.0 : ((float)loop.self_cpu_cycles / total_cycles);
+            float self_ipc = loop.self_cpu_cycles == 0 ? 0.0 : ((float)loop.self_inst_retired/loop.self_cpu_cycles);
+            float self_cyc_per_iter = loop.count == 0 ? 0.0 : ((float)loop.self_cpu_cycles / loop.count);
+            float self_inst_per_iter = loop.count == 0 ? 0.0 : ((float)loop.self_inst_retired / loop.count);
+            myfile << indent << "- loop: 0x" << hex << loop.addr.head.second << "\n";
+            myfile << indent << "  back-edges: [";
+            bool first_edge = true;
+            for (auto &addr: loop.back_edges) {
+                if (!first_edge) myfile << ", ";
+                myfile << "0x" << hex << addr.second;
+                first_edge = false;
+            }
+            myfile << "]\n";
+            myfile << indent << "  invocations: " << dec << stats.executions << "\n";
+            myfile << indent << "  stats: {"
+                << "iterations: " << dec << loop.count
+                << ", iter-per-invoc: " << dec << fixed << showpoint << setprecision(1) << iter_per_invoc
+                << "}\n";
+            if (loop.nested_loops.size() > 0) {
+                myfile << indent << "  stats-inclusive: {";
+                if (stats.samples > 0) {
+                    myfile << "ipc: " << dec << fixed << showpoint << setprecision(2) << ipc
+                        << ", cover: " << dec << fixed << showpoint << setprecision(3) << cover
+                        << ", cycles: " << dec << stats.cycles
+                        << ", samples: " << dec << stats.samples
+                        << ", cyc-per-iter: " << dec << fixed << showpoint << setprecision(1) << cyc_per_iter
+                        << ", ";
+                }
+                myfile << "inst-per-iter: " << dec << fixed << showpoint << setprecision(1) << inst_per_iter
+                        << "}\n";
+            }
+            myfile << indent << "  stats-exclusive: {";
+            if (loop.self_samples > 0) {
+                myfile << "ipc: " << dec << fixed << showpoint << setprecision(2) << self_ipc
+                    << ", cover: " << dec << fixed << showpoint << setprecision(3) << self_cover
+                    << ", cycles: " << dec << loop.self_cpu_cycles
+                    << ", samples: " << dec << loop.self_samples
+                    << ", cyc-per-iter: " << dec << fixed << showpoint << setprecision(1) << self_cyc_per_iter
+                    << ", ";
+            }
+            myfile << "inst-per-iter: " << dec << fixed << showpoint << setprecision(1) << self_inst_per_iter
+                << "}\n";
+            myfile << indent << "  blocks-exclusive: [";
+            bool first_block = true;
+            for (auto &block: stats.exclusive_body) {
+                if (!first_block) myfile << ", ";
+                myfile << "0x" << hex << block.second;
+                first_block = false;
+            }
+            myfile << "]\n";
+            myfile << indent << "  blocks-inclusive: [";
+            first_block = true;
+            for (auto &block: loop.loop_body) {
+                if (!first_block) myfile << ", ";
+                myfile << "0x" << hex << block.second;
+                first_block = false;
+            }
+            myfile << "]\n";
+            myfile << indent << "  callees: [";
+            bool first_callee = true;
+            if (parent) {
+                for (const function *callee : parent->callees) {
+                    if (!callee) continue;
+                    bool found = false;
+                    for (const address &site : callee->callsites) {
+                        if (loop.loop_body.count(site) == 0) continue;
+                        found = true;
+                        break;
+                    }
+                    if (!found) continue;
+                    if (!first_callee) myfile << ", ";
+                    myfile << "{module: " << dec << callee->entry.first
+                        << ", offset: 0x" << hex << callee->entry.second
+                        << "}";
+                    first_callee = false;
+                }
+            }
+            myfile << "]\n";
+            write_structure_from(myfile, level + 1, parent, stats.node_loop, all_loops, functions, cfg, profiling_result);
+        }
+    }
+}
+
+void write_structure(
+        const string &path,
+        const list<loop> &all_loops,
+        const func_table &functions,
+        const dycfg &cfg,
+        const inst_table &profiling_result) {
+    ofstream myfile;
+    myfile.open(path);
+    if (!myfile.is_open()) {
+        throw runtime_error("failed to open loops csv file!");
+    }
+    myfile << "modules:\n";
+    for (app_module_id i = 0; i < modules.size(); i++) {
+        auto find = profiling_result.lower_bound(address(i, 0));
+        if (find == profiling_result.end()) continue;
+        if (find->first.first != i) continue;
+        const app_module &cmod = module_lookup(i);
+        myfile << " - module: " << dec << i << "\n";
+        myfile << "   path: '" << yaml_escape(cmod.path) << "'\n";
+    }
+    myfile << "nodes:\n";
+
+    write_structure_from(myfile, 0, nullptr, nullptr, all_loops, functions, cfg, profiling_result);
+
+    myfile.close();
 }
