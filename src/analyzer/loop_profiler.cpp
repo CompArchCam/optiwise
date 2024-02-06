@@ -217,9 +217,9 @@ void generate_loop_statistics(inst_table &profiling_result, dycfg &cfg, list<loo
             if (remaining == 0 && prof.line) {
                 block.last_inlined_func_name = prof.line->inlined_func_name;
             }
-            if (prof.line && prof.line->inlined_func_name && prof.line->source) {
+            if (prof.line && prof.line->source) {
                 auto &source = prof.line->source;
-                auto &inlined_func_name = *prof.line->inlined_func_name;
+                auto inlined_func_name = prof.inlined_func_name();
                 auto &file_map = block.source_line_map[inlined_func_name];
                 auto &line_set = file_map[*source->filename];
                 line_set.insert(source->line);
