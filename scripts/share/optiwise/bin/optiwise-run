@@ -34,6 +34,9 @@ Options:
   -i, --stdin   Redirect stdin for the profiled program to be the specified file.
   -o, --stdout  Redirect stdout for the profiled program to be the specified file.
   -e, --stderr  Redirect stderr for the profiled program to be the specified file.
+  -s, --skip    Skip a command e.g. '--skip count' would cause 'optiwise run'
+                not to execute 'optiwise count'. This allows reusing a previous
+                result. Can be specified multiple times to skip several commands.
 EOF
       exit 0
       ;;
@@ -53,6 +56,19 @@ EOF
     --stdout=*) stdout="--stdout=${1#--*=}";;
     -e|--stderr) shift; stderr="--stderr=$1";;
     --stderr=*) stderr="--stderr=${1#--*=}";;
+    -s|--skip)
+      shift
+      opt="$1"
+      shift
+      set -- "--skip=$opt" "$@"
+      continue
+      ;;
+    --skip=check) skip_check="$1" ;;
+    --skip=sample) skip_sample="$1" ;;
+    --skip=disassemble) skip_disassemble="$1" ;;
+    --skip=count) skip_count="$1" ;;
+    --skip=analyze) skip_analyze="$1" ;;
+    --skip=gui) skip_gui="$1" ;;
     --) shift; break;;
     -[^-]?*)
       opt="$1"
@@ -91,50 +107,63 @@ if [ ! -d "$result_dir" ]; then
   mkdir -p "$result_dir" || exit $?
 fi
 
-if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@"
+if [ -z "${skip_check-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@"
+  fi
+
+  "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@" || exit $?
 fi
 
-"$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@" || exit $?
+if [ -z "${skip_sample-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-sample" \
+      ${flag_verbose-} --name="$name" \
+      ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
+      -- "$@"
+  fi
 
-if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-sample" \
+  "$share_bin_dir/optiwise-sample" \
     ${flag_verbose-} --name="$name" \
     ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
-    -- "$@"
+    -- "$@" || exit $?
 fi
 
-"$share_bin_dir/optiwise-sample" \
-  ${flag_verbose-} --name="$name" \
-  ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
-  -- "$@" || exit $?
+if [ -z "${skip_disassemble-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-disassemble" \
+      ${flag_verbose-} ${objdump-} --name="$name"
+  fi
 
-if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-disassemble" \
-    ${flag_verbose-} ${objdump-} --name="$name"
+  "$share_bin_dir/optiwise-disassemble" \
+    ${flag_verbose-} ${objdump-} --name="$name" || exit $?
 fi
 
-"$share_bin_dir/optiwise-disassemble" \
-  ${flag_verbose-} ${objdump-} --name="$name" || exit $?
+if [ -z "${skip_count-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-count" \
+      ${flag_verbose-} --name="$name" \
+      ${stdin-} ${stdout-} ${stderr-} \
+      -- "$@"
+  fi
 
-if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-count" \
+  "$share_bin_dir/optiwise-count" \
     ${flag_verbose-} --name="$name" \
     ${stdin-} ${stdout-} ${stderr-} \
-    -- "$@"
+    -- "$@" || exit $?
 fi
 
-"$share_bin_dir/optiwise-count" \
-  ${flag_verbose-} --name="$name" \
-  ${stdin-} ${stdout-} ${stderr-} \
-  -- "$@" || exit $?
+if [ -z "${skip_analyze-}" ]; then
+  if [ "${flag_verbose-}" ]; then
+    echo "$share_bin_dir/optiwise-analyze" \
+      ${flag_verbose-} --name="$name"
+  fi
 
-if [ "${flag_verbose-}" ]; then
-  echo "$share_bin_dir/optiwise-analyze" \
+  "$share_bin_dir/optiwise-analyze" \
     ${flag_verbose-} --name="$name"
 fi
 
-if [ "${flag_gui-}" ]; then
+if [ "${flag_gui-}" ] && [ -z "${skip_gui-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-gui" \
       ${flag_verbose-} --name="$name"
