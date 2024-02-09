@@ -8,6 +8,7 @@ share_dir="$(realpath "$share_bin_dir/..")"
 dynamorio_dir="$share_dir/dynamorio"
 result_dir=optiwise_result
 objdump=objdump
+perf_event="cpu-cycles:uP"
 
 while :; do
   case "${1-}" in
@@ -30,6 +31,9 @@ Options:
   -g, --gui    Check if 'optiwise gui' is likely to succeed.
   -E, --objdump=<binary>
                Override the path/name of the 'objdump' utility.
+  --perf-event=<event>
+               Override the '-e/--event' argument to perf record. Sometimes
+               necessary as a workaround for unusual PMUs.
 EOF
       exit 0
       ;;
@@ -41,6 +45,8 @@ EOF
     -g|--gui) flag_gui="$1";;
     -E|--objdump) shift; objdump="$1";;
     --objdump=*) objdump="${1#--*=}";;
+    --perf-event) shift; perf_event="$1";;
+    --perf-event=*) perf_event="${1#--*=}";;
     --) shift; break;;
     -?*)
       cat >&2 <<EOF
@@ -96,16 +102,16 @@ Error: The installed version of perf does not match your kernel version.
        may help, or otherwise updating perf and/or the kernel to match.
 EOF
     any_error=1
-  elif ! perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true > /dev/null 2> /dev/null; then
+  elif ! perf record -e "$perf_event" -g -o /dev/null -- true > /dev/null 2> /dev/null; then
     cat >&2 << EOF
 Error: perf record does not seem to work.
 
        For example, running:
-         perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true
+         perf record -e '$perf_event' -g -o /dev/null -- true
        returns an error and prints:
 
 EOF
-    perf record -e 'cpu-cycles:uP' -g -o /dev/null -- true > /dev/null
+    perf record -e "$perf_event" -g -o /dev/null -- true > /dev/null
     printf "\n\n" >&2
     any_error=1
   elif [ -z "${flag_quiet+1}" ]; then
