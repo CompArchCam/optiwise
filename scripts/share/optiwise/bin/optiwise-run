@@ -31,6 +31,9 @@ Options:
   -f, --frequency
                 Sets sampling frequency to specified value in Hz.
   -E, --objdump Override the name of the 'objdump' utility.
+  --perf-event=<event>
+                Override the '-e/--event' argument to perf record. Sometimes
+                necessary as a workaround for unusual PMUs.
   -i, --stdin   Redirect stdin for the profiled program to be the specified file.
   -o, --stdout  Redirect stdout for the profiled program to be the specified file.
   -e, --stderr  Redirect stderr for the profiled program to be the specified file.
@@ -50,6 +53,8 @@ EOF
     --frequency=*) frequency="--frequency=${1#--*=}";;
     -E|--objdump) shift; objdump="--objdump=$1";;
     --objdump=*) objdump="--objdump=${1#--*=}";;
+    --perf-event) shift; perf_event="--perf-event=$1";;
+    --perf-event=*) perf_event="--perf-event=${1#--*=}";;
     -i|--stdin) shift; stdin="--stdin=$1";;
     --stdin=*) stdin="--stdin=${1#--*=}";;
     -o|--stdout) shift; stdout="--stdout=$1";;
@@ -109,23 +114,23 @@ fi
 
 if [ -z "${skip_check-}" ]; then
   if [ "${flag_verbose-}" ]; then
-    echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@"
+    echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@"
   fi
 
-  "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${flag_gui-} -- "$@" || exit $?
+  "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@" || exit $?
 fi
 
 if [ -z "${skip_sample-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-sample" \
       ${flag_verbose-} --name="$name" \
-      ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
+      ${frequency-} ${perf_event-} ${stdin-} ${stdout-} ${stderr-} \
       -- "$@"
   fi
 
   "$share_bin_dir/optiwise-sample" \
     ${flag_verbose-} --name="$name" \
-    ${frequency-} ${stdin-} ${stdout-} ${stderr-} \
+    ${frequency-} ${perf_event-} ${stdin-} ${stdout-} ${stderr-} \
     -- "$@" || exit $?
 fi
 

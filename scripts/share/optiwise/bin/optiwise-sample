@@ -7,6 +7,7 @@ result_dir=optiwise_result
 frequency=1000
 perf_opts=0
 name=result
+perf_event=cpu-cycles:uP
 
 # A note on parsing strategy: we move any --perf-opt options to the end of the
 # argument list, noting how many there are in $perf_opts. Then we rotate these
@@ -37,6 +38,9 @@ Options:
   -i, --stdin   Redirect stdin for the sampled program to be the specified file.
   -o, --stdout  Redirect stdout for the sampled program to be the specified file.
   -e, --stderr  Redirect stderr for the sampled program to be the specified file.
+  --perf-event=<event>
+                Override the '-e/--event' argument to perf record. Sometimes
+                necessary as a workaround for unusual PMUs.
   -p, --perf-opt=<option>
                 Pass option(s) to 'perf record' directly. Can be specified
                 multiple times.
@@ -58,6 +62,8 @@ EOF
     --stdout=*) stdout="${1#--*=}";;
     -e|--stderr) shift; stderr="$1";;
     --stderr=*) stderr="${1#--*=}";;
+    --perf-event) shift; perf_event="$1";;
+    --perf-event=*) perf_event="${1#--*=}";;
     -p|--perf-opt)
       perf_opts=$(($perf_opts+1))
       shift
@@ -153,7 +159,7 @@ if [ "${flag_verbose-}" ]; then
     ${flag_verbose-} \
     -o "$result_dir/sample/$name_sample" \
     -g -i \
-    -e 'cpu-cycles:uP' \
+    -e \'"$perf_event"\' \
     -F "$frequency" \
     --buildid-all \
     "$@"
@@ -162,7 +168,7 @@ exec perf --buildid-dir "$(realpath "$result_dir/binaries")" record \
   ${flag_verbose-} \
   -o "$result_dir/sample/$name_sample" \
   -g -i \
-  -e 'cpu-cycles:uP' \
+  -e "$perf_event" \
   -F "$frequency" \
   --buildid-all \
   "$@"
