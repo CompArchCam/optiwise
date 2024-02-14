@@ -9,6 +9,7 @@ def _make_page(title, body):
         '<!DOCTYPE html>',
         '<html>',
         ' <head>',
+        '  <meta charset="utf-8">',
         '  <title>' + html.escape(title, quote=False) + '</title>',
         '  <style>',
         '.function-name { font-family: monospace; }',
@@ -197,7 +198,15 @@ def _cover_color(cover):
 
 # https://stackoverflow.com/a/25808207
 def safePath(url):
-    return ''.join(map(lambda ch: chr(ch) if ch in safePath.chars else '%%%02x' % ch, url.encode('utf-8')))[:128]
+    url = url.replace('::', '.')
+    return ''.join(map(lambda ch:
+        chr(ch) if ch in safePath.chars
+        else '[' if ch == ord('<')
+        else ']' if ch == ord('>')
+        else '.' if ch == ord(':')
+        else '.' if ch == ord(',')
+        else '%%%02x' % ch, url.encode('utf-8')
+    ))[:128]
 safePath.chars = frozenset(map(lambda x: ord(x), '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-_ .(){}[]^&;@!'))
 
 class Renderer:
@@ -290,7 +299,7 @@ class Renderer:
                         label=''.join([
                             '<',
                             '<FONT FACE="monospace">',
-                            node.function.name,
+                            html.escape(node.function.name),
                             '</FONT><BR /><FONT POINT-SIZE="8.0" FACE="sans">',
                             str(node.raw.invocations),
                             '</FONT><BR /><FONT POINT-SIZE="8.0" FACE="sans">',

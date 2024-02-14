@@ -331,9 +331,25 @@ class Processed:
         demangle(['-p'], demang_noargs)
         demangle([], demang_args)
 
+        def remove_template(name):
+            if name[-1] != '>': return name
+            level = 0
+            i = -1
+            for c in reversed(name):
+                if c == '>': level += 1
+                elif c == '<': level -= 1
+                if level == 0:
+                    return name[:i]
+                i -= 1
+            return name
+
         def set_name(function):
             if function.rawname in demang_noargs:
                 function.shortname = demang_noargs[function.rawname]
+                if len(function.shortname) > 48:
+                    function.shortname = remove_template(function.shortname)
+                if len(function.shortname) > 48:
+                    function.shortname = '...' + function.shortname[-45:]
             if function.rawname in demang_args:
                 function.longname = demang_args[function.rawname]
                 pos = function.longname.rfind('[clone ')
