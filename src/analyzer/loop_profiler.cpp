@@ -64,7 +64,7 @@ int inner_main(int argc, char **argv) {
         return 1;
     }
 
-    module_add_or_find("<none>");
+    module_add_or_find("<none>", module_add_or_find_role::none);
 
     /* read the instruction name from objdump output */
     objdump_table objdump_result;
@@ -97,6 +97,8 @@ int inner_main(int argc, char **argv) {
     func_sample func_sample_table;
     cout << "Info: Reading perf result from " << argv[1] << endl;
     read_perf_result(argv[1], objdump_result, profiling_result, func_sample_table);
+
+    report_module_problems();
 
     cout << "Info: Compute function statistics..." << endl;
     compute_function_statistics(functions, cfg);
