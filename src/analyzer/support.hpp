@@ -16,14 +16,31 @@
 using namespace std;
 
 struct app_module {
-    string path;
+    set<string> paths;
     map<uint64_t, pair<uint64_t, uint64_t>> file_offset_to_vaddr;
+    bool have_disassemble = false;
+    bool have_count = false;
+    bool have_sample = false;
+    uint64_t samples = 0;
+    uint64_t counts = 0;
+
+    app_module(string path) {
+        paths.insert(path);
+    }
+    const string &path() const { return *paths.begin(); }
 };
 
 typedef vector<app_module>::size_type app_module_id;
 typedef pair<app_module_id, uint64_t> address;
 
-app_module_id module_add_or_find(const string &path);
+enum class module_add_or_find_role {
+    none,
+    disassemble,
+    count,
+    sample,
+};
+app_module_id module_add_or_find(
+        const string &path, module_add_or_find_role role);
 app_module &module_lookup(app_module_id id);
 
 struct loop;

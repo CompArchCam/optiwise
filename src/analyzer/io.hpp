@@ -15,6 +15,8 @@ public:
     const char* what() const noexcept override;
 };
 
+void report_module_problems();
+
 void read_perf_result(
         const char* perf_result_path,
         objdump_table& objdump_result,

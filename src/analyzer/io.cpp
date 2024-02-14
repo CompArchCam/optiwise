@@ -2,6 +2,7 @@
 
 #include "io.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -16,6 +17,8 @@ using namespace std;
 
 static vector<app_module> modules;
 static uint64_t total_cycles = 0;
+static uint64_t total_samples = 0;
+static uint64_t total_instructions = 0;
 
 parse_error::parse_error(const std::string &msg, const std::string &file, unsigned line)
         : std::runtime_error(msg), file(file), line(line) {
@@ -48,26 +51,114 @@ static inline ostream &operator<<(ostream &os, const address &addr) {
     return os;
 }
 
-app_module_id module_add_or_find(const string &path) {
-    app_module_id id = 0;
-    for (auto &m: modules) {
-        if (m.path == path) return id;
-        id++;
+size_t path_filename_part(const string &path) {
+    if (path.size() < 1) return 0;
+    size_t last_slash = path.rfind('/', path.size() - 2);
+    if (last_slash == string::npos) return 0;
+    return last_slash+1;
+}
+
+bool &module_have_field(app_module &m, module_add_or_find_role role) {
+    static bool dummy = true;
+    switch (role) {
+    case module_add_or_find_role::none: dummy=true; return dummy;
+    case module_add_or_find_role::disassemble: return m.have_disassemble;
+    case module_add_or_find_role::count: return m.have_count;
+    case module_add_or_find_role::sample: return m.have_sample;
     }
-    modules.emplace_back(app_module{
-        .path = path,
-    });
+    __builtin_unreachable();
+}
+
+app_module_id module_add_or_find(const string &path, module_add_or_find_role role) {
+    app_module_id id = -1;
+    app_module_id guess = -1;
+    bool multiple_guess = false;
+    size_t path_filename = path_filename_part(path);
+    for (auto &m: modules) {
+        id++;
+        bool approx_match = false;
+        for (const auto p: m.paths) {
+            if (p != path) {
+                size_t p_filename = path_filename_part(p);
+                approx_match = approx_match || std::equal(
+                        std::next(path.cbegin(), path_filename), path.cend(),
+                        std::next(p.cbegin(), p_filename), p.cend());
+                continue;
+            }
+            module_have_field(m, role) = true;
+            return id;
+        }
+        if (module_have_field(m, role)) continue;
+        if (approx_match) {
+            if (guess != app_module_id(-1)) multiple_guess = true;
+            guess = id;
+        }
+    }
+    if (guess != app_module_id(-1) && !multiple_guess) {
+        id = guess;
+        modules.at(id).paths.insert(path);
+    } else {
+        id++;
+        modules.emplace_back(app_module(path));
+    }
+    module_have_field(modules.at(id), role) = true;
     return id;
 }
 
 app_module &module_lookup(app_module_id id) {
-    static app_module undefined{
-        .path = "NA",
-    };
+    static app_module undefined("NA");
     if (id == app_module_id(-1)) {
         return undefined;
     }
     return modules.at(id);
+}
+
+static void write_mismatched_modules_warning() {
+    static bool have_warning = false;
+    if (have_warning) return;
+    have_warning = true;
+    cerr <<
+"Warning: The input files seem to have inconsistent modules. This could be\n"
+"         you are mistakenly combining inputs from unrelated programs, or else\n"
+"         it could be that the program loaded different libraries between the\n"
+"         sampling and instrumentation runs. More specific detail on module\n"
+"         problems:" << endl;
+}
+
+void report_module_problems() {
+    for (const auto &m: modules) {
+        if (m.have_sample == m.have_count) continue;
+        // Module lacks either samples or counts. Is it signficant?
+        if (m.have_sample && m.samples / (total_samples / 128) == 0) continue;
+        if (m.have_count && m.counts / (total_instructions / 128) == 0) continue;
+        write_mismatched_modules_warning();
+        if (m.have_sample) {
+            cerr <<
+" - Module with significant samples but not instrumented:\n";
+        } else {
+            cerr <<
+" - Module with significant instructions but not sampled:\n";
+        }
+        for (const auto &path: m.paths) {
+            cerr <<
+"      '" << path << "'\n";
+        }
+            cerr <<
+"   This may prevent statistics being computed for this module." << endl;
+    }
+
+    for (const auto &m: modules) {
+        if (m.paths.size() == 1) continue;
+        write_mismatched_modules_warning();
+            cerr <<
+" - Analyzer is assuming (not verifying) these paths are the same executable:\n";
+        for (const auto &path: m.paths) {
+            cerr <<
+"      '" << path << "'\n";
+        }
+        cerr <<
+"   If this is wrong, the results for this module may be nonesense." << endl;
+    }
 }
 
 struct loaded_module {
@@ -93,7 +184,7 @@ trace_pair parseTracePair(istream &ss, const vector<loaded_module> &loaded_modul
     if (paren_l != string::npos && paren_r != string::npos && paren_l < paren_r) {
         module = module.substr(paren_l+1, paren_r - paren_l - 1);
         if (module != "[unknown]") {
-            mod = module_add_or_find(module);
+            mod = module_add_or_find(module, module_add_or_find_role::sample);
             const loaded_module *load_vaddr = nullptr;
             const loaded_module *load_offset = nullptr;
             for (const auto &m: loaded_modules) {
@@ -223,7 +314,7 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
         ss.get();
         getline(ss, path);
         const uint64_t mmap_offset = offset;
-        const app_module_id id(module_add_or_find(path));
+        const app_module_id id(module_add_or_find(path, module_add_or_find_role::sample));
         const app_module &mod = module_lookup(id);
         // find a program header line that this mapping covers entirely.
         auto offs = mod.file_offset_to_vaddr.upper_bound(mmap_offset);
@@ -274,6 +365,8 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
                 id = m.id;
                 sample_address -= m.addr;
                 sample_address += m.offset;
+                module_lookup(id).have_sample = true;
+                break;
             }
         }
         bad_sample_address = id == 0 || id == app_module_id(-1);
@@ -333,7 +426,9 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
 
     if (counter.substr(0,3+1+6+1) == "cpu-cycles:") {
         p->cpu_cycles = value;
+        module_lookup(p->addr.first).samples++;
         total_cycles += value;
+        total_samples++;
     }
 }
 
@@ -677,7 +772,8 @@ void read_disassembly(string filename, objdump_table& objdump_result){
         if (asm_line.substr(0, 5) == "FILE ") {
             // a module e.g.
             // 'FILE /usr/lib/x86_64-linux-gnu/ld-2.31.so'
-            current_module = module_add_or_find(asm_line.substr(5));
+            current_module = module_add_or_find(asm_line.substr(5),
+                    module_add_or_find_role::disassemble);
             symbol_table.clear();
             current_symtab = &empty_symtab;
             state = parser_state::in_file;
@@ -795,7 +891,7 @@ void read_source_table(const objdump_table &objdump_result, source_table& objdum
         if (any_source[module])
             cerr << "Warning: some source files not available e.g. '" << filename << "'" << endl;
         else
-            cerr << "Warning: source files not available for '" << module_lookup(module).path << "'" << endl;
+            cerr << "Warning: source files not available for '" << module_lookup(module).path() << "'" << endl;
     }
 }
 
@@ -816,7 +912,7 @@ void read_cfg(
         aarch64,
     } arch = arch::none;
     cfg_node *current_node;
-    map<app_module_id, app_module_id> module_map;
+    map<app_module_id, string> module_paths;
     bool entry_found(false);
     unsigned int last_instruction_end = 0;
     unsigned int lineno = 0;
@@ -845,8 +941,10 @@ void read_cfg(
             if (!line_stream)
                 throw parse_error("Incorrect format in Module", filename, lineno);
             line_stream.get();
+            if (module_paths.count(index) > 0)
+                throw parse_error("Incorrect format in Module", filename, lineno);
             getline(line_stream, path);
-            module_map[index] = module_add_or_find(path);
+            module_paths[index] = path;
         } else if (line.substr(0, 5) == "Entry") {
             string temp, path;
             address addr;
@@ -862,6 +960,7 @@ void read_cfg(
             string end_inst;
             line_stream >> start_addr
                         >> dec >> tmp.count >> tmp.callee_instcount >> end_inst;
+            total_instructions += tmp.count;
             if (!line_stream) {
                 throw parse_error("incorrect format in cfg file", filename, lineno);
             }
@@ -900,11 +999,22 @@ void read_cfg(
         }
     }
 
+    // deduce the correspondence between modules.
+    map<app_module_id, app_module_id> module_map;
+    for (const auto &m : module_paths) {
+        app_module_id index = m.first;
+        const string &path = m.second;
+
+        module_map[index] = module_add_or_find(path,
+                module_add_or_find_role::count);
+    }
+
     // convert from cfg file module numbering to this session's numbering
     dycfg old_cfg;
     old_cfg.swap(cfg);
     for (auto &node: old_cfg) {
         address key(module_map[node.first.first], node.first.second);
+        module_lookup(key.first).counts += node.second.count;
         cfg[key] = node.second;
         cfg_node &newnode = cfg.at(key);
         map<address, uint64_t> old_child;
@@ -981,7 +1091,7 @@ void write_exe_count(
         const app_module &mod = module_lookup(address.first);
         float cpi = itr->second.execution_count == 0 ? 0.0 :
             ((float)itr->second.cpu_cycles/itr->second.execution_count);
-        myfile << '"' << mod.path << "\","
+        myfile << '"' << mod.path() << "\","
                << hex << "0x" << address.second << ","
                << dec << itr->second.samples << "," << itr->second.execution_count << ','
                << itr->second.cpu_cycles << ','
@@ -1026,7 +1136,7 @@ void write_loop(
         float self_ipc = itr.self_cpu_cycles == 0 ? 0.0 : ((float)itr.self_inst_retired/itr.self_cpu_cycles);
         float self_cyc_per_iter = itr.count == 0 ? 0.0 : ((float)itr.self_cpu_cycles / itr.count);
         float self_inst_per_iter = itr.count == 0 ? 0.0 : ((float)itr.self_inst_retired / itr.count);
-        myfile << '"' << mod.path << "\",0x"
+        myfile << '"' << mod.path() << "\",0x"
                << hex << itr.addr.head.second << ",0x"
                << itr.addr.tail.second << ','
                << dec << itr.size << ',' << itr.self_size << ',' << itr.count << ',' << invocations << ','
@@ -1339,7 +1449,7 @@ void write_structure(
         if (find->first.first != i) continue;
         const app_module &cmod = module_lookup(i);
         myfile << " - module: " << dec << i << "\n";
-        myfile << "   path: '" << yaml_escape(cmod.path) << "'\n";
+        myfile << "   path: '" << yaml_escape(cmod.path()) << "'\n";
     }
     myfile << "nodes:\n";
 
