@@ -327,7 +327,7 @@ static void event_exit(void) {
             DR_ASSERT(cfg_table[i].child.size() > 0);
             auto tmp = cfg_table[i].child.begin();
             uint64_t targ_count = cfg_table[i].count - cfg_table[i].fall_count;
-            if (targ_count > 0)
+            if (cfg_table[i].count > cfg_table[i].fall_count)
                 tmp->second =  targ_count; // update target count
             else
                 cfg_table[i].child.erase(tmp);
@@ -622,6 +622,7 @@ static void event_exit(void) {
     PRINTF_STDOUT("number of static mbr: %ld, number of block: %ld, ratio: %f\n",
                 num_mbr, cfg_table.size(), (float) num_mbr/cfg_table.size());
 #endif
+    PRINTF_STDOUT("Info: exit\n");
 }
 
 static void clean_call(uint block_size, app_pc start_pc, app_pc end_pc, int opcode)
@@ -1341,13 +1342,24 @@ static void handle_longjmp(void *stack_pointer) {
     }
     if (!have_warning) {
         PRINTF_STDERR(
-"Warning: profiling stack pointer desynchronized: %p != %p.\n",
+"Warning: profiling stack pointer desynchronized: %p != %p.\n"
 "         This likely means the application is doing odd things with the stack\n"
 "         pointer (e.g. co-routines). Nesting profiling information will likely\n"
 "         be inaccurate (e.g. bad statistics for loops with function calls).\n",
                 stack_pointer, call_stack[stack_index].stack_pointer);
         have_warning = true;
     }
+
+    // We push another stack frame to avoid underflowing the stack.
+    if (stack_index >= stack_size - 1) stackoverflow_exit();
+    stack_index++;
+    static uint64_t dummy = 0;
+    call_stack[stack_index] = {
+        .callee_count_pointer = &dummy,
+        .counter = inst_counter,
+        .stack_pointer = stack_pointer,
+    };
+    inst_counter = 0;
 }
 
 #ifdef __x86_64__
