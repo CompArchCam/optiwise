@@ -405,11 +405,22 @@ static void event_exit(void) {
         if (address.first != 0 || address.second != 0)
             executed_modules.insert(address.first);
         auto next = std::next(itr);
-        if (block.end_addr == next->second.end_addr) { // blocks overlap
+        if (address.first == next->first.first && block.end_addr > next->first.second) { // blocks overlap
+            if (block.end_addr != next->second.end_addr) { // partial overlap!
+                for (auto &itr_child : block.child) {
+                    if (itr_child.first.first == address.first &&
+                            itr_child.first.second < next->second.end_addr &&
+                            itr_child.first.second > address.second) {
+                        cfg_map.at(itr_child.first).count -= itr_child.second;
+                        itr_child.second = 0;
+                    }
+                }
+            }
             next->second.count += block.count; // update execution count
             next->second.callee_count += block.callee_count;
             block.callee_count = 0;
             for (auto itr_child : block.child) { // merge child blocks
+                if (itr_child.second == 0) continue;
                 if (next->second.child.count(itr_child.first) > 0) { // if the child of current block exists in the child of next block
                     next->second.child[itr_child.first] += itr_child.second;
                 } else {
@@ -418,18 +429,22 @@ static void event_exit(void) {
             }
             block.child.clear();
             block.child[next->first] = block.count; // update child blcok of new splitted block
-            block.block_size -= next->second.block_size; // update block size
             block.inst_name = overlap_end;
-            unsigned next_bytes;
             #ifdef __x86_64__
+            unsigned next_bytes;
             next_bytes = 0;
-            for (int i = 0; i < next->second.block_size; ++i) {
-                next_bytes += next->second.inst_length[i];
+            for (int i = 0; i < block.block_size; ++i) {
+                if (next_bytes + block.inst_length[i] + address.second >= next->first.second) {
+                    block.block_size = i + 1;
+                    block.end_addr = address.second + next_bytes;
+                    break;
+                }
+                next_bytes += block.inst_length[i];
             }
             #elif defined(__aarch64__)
-            next_bytes = next->second.block_size * INST_LEN;
+            block.block_size = (next->first.second - address.second) / INST_LEN; // update block size
+            block.end_addr = next->first.second - INST_LEN;
             #endif
-            block.end_addr -= next_bytes;
         }
     } // end merge
 
