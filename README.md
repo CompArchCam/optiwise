@@ -6,7 +6,7 @@ sampling, and the other using high-overhead dynamic instrumentation.  The
 results of these two runs are then combined to give per instruction, per basic
 block, per loop, and per function overheads. This information can be viewed in
 both a machine readable (CSV and YAML) and human friendly (interactive HTML user
-interface) form.
+interface) form. If you use OptiWISE in your work please cite our [CGO24 publication](#publication).
 
 <video src="https://github.com/CompArchCam/optiwise/assets/1593708/10b82c14-8276-412a-a56d-e462cceeb413"></video>
 
@@ -47,3 +47,11 @@ optiwise run --gui -- /usr/bin/echo hello
 For more fine grain control, see `optiwise help`.  The subcommands of OptiWISE
 will allow you to configure the individual jobs in OptiWISE and configure
 various additional options.
+
+# Publication
+
+OptiWISE is developed at the University of Cambridge, Department of Computer Science and Technology. You can find more information about OptiWISE in our publication. Please cite this if you use OptiWISE in your work.
+
+Y. Guo et al., ["OptiWISE: Combining Sampling and Instrumentation for Granular CPI Analysis,"](https://doi.org/10.1109/CGO57630.2024.10444771) 2024 IEEE/ACM International Symposium on Code Generation and Optimization (CGO), Edinburgh, United Kingdom, 2024, pp. 373-385, doi: 10.1109/CGO57630.2024.10444771.
+
+
