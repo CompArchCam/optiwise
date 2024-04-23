@@ -405,7 +405,7 @@ static void event_exit(void) {
         if (address.first != 0 || address.second != 0)
             executed_modules.insert(address.first);
         auto next = std::next(itr);
-        if (address.first == next->first.first && block.end_addr > next->first.second) { // blocks overlap
+        if (address.first == next->first.first && block.end_addr >= next->first.second) { // blocks overlap
             if (block.end_addr != next->second.end_addr) { // partial overlap!
                 for (auto &itr_child : block.child) {
                     if (itr_child.first.first == address.first &&
