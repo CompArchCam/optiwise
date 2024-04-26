@@ -180,6 +180,15 @@ static void event_module_unload(void *drcontext, const module_data_t *info);
 static void at_mbr(uint64_t src, app_pc targ);
 static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 
+static reg_id_t allocate_temporary_reg(instr_t *instr, const reg_id_t after=DR_REG_NULL);
+#if defined(__aarch64__)
+// DynamoRIO steals a reg on AArch64, which cannot be used in instrumentation.
+// This method adjusts an opnd to use a safe reg, and indicates where
+// instrumentation should be inserted. Does nothing if opnd is already safe.
+static instr_t *make_opnd_unstolen(
+        void *drcontext, instrlist_t *bb, instr_t *instr, opnd_t *opnd);
+#endif
+
 #ifdef __x86_64__
 static void at_mbr_x86(app_pc instr_addr, app_pc target_addr);
 #endif
@@ -972,18 +981,10 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         /* move mbr targ addr to targ_reg */
         opnd_t tls_opnd = dr_reg_spill_slot_opnd(drcontext, SPILL_SLOT_3);
         instr_t *newinst;
-        reg_id_t reg_target;
-        reg_id_t reg_first_addr;
-        for (reg_target = DR_REG_RAX+1; reg_target <= DR_REG_R15; reg_target++) {
-            if (!instr_uses_reg(last_inst, reg_target))
-                break; // find a reg not used by the mbr
-        }
+        reg_id_t reg_target = allocate_temporary_reg(last_inst);
+        reg_id_t reg_first_addr = allocate_temporary_reg(last_inst, reg_target);
         newinst = INSTR_CREATE_mov_st(drcontext, tls_opnd, opnd_create_reg(reg_target));
         instrlist_meta_preinsert(bb, last_inst, newinst); // store the original reg into SPILL_SLOT_3
-        for (reg_first_addr = DR_REG_RAX+1; reg_first_addr <= DR_REG_R15; reg_first_addr++) {
-            if ((reg_first_addr != reg_target) && (!instr_uses_reg(last_inst, reg_first_addr)))
-                break; // find a another reg not used by the mbr
-        }
         dr_save_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2); // save reg_first_addr
         if (instr_is_return(last_inst)) {
             /* the retaddr operand is always the final source for all OP_ret* instrs */
@@ -1074,15 +1075,8 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         instr_t* first_targ_label = INSTR_CREATE_label(drcontext);
         instr_t* last_inst_label = INSTR_CREATE_label(drcontext);
         /* move cfg_table[block_num].first_targ_pc into reg_first_addr */
-        reg_id_t reg_first_addr, reg_tmp;
-        for (reg_first_addr = DR_REG_X0+1; reg_first_addr <= DR_REG_X30; reg_first_addr++) {
-            if (!instr_uses_reg(last_inst, reg_first_addr))
-                break; // find a another reg not used by the mbr
-        }
-        for (reg_tmp = DR_REG_X0+1; reg_tmp <= DR_REG_X30; reg_tmp++) {
-            if ((reg_tmp != reg_first_addr) && (!instr_uses_reg(last_inst, reg_tmp)))
-                break; // find a another reg not used by the mbr
-        }
+        reg_id_t reg_first_addr = allocate_temporary_reg(last_inst);
+        reg_id_t reg_tmp = allocate_temporary_reg(last_inst, reg_first_addr);
         dr_save_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2); // save reg_first_addr
         dr_save_reg(drcontext, bb, last_inst, reg_tmp, SPILL_SLOT_3); // save reg_tmp
         instr_create_reg64(bb, last_inst, drcontext, opnd_create_reg(reg_tmp), (uint64_t) &cfg_table[block_num].first_targ_pc);
@@ -1109,7 +1103,9 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         dr_restore_reg(drcontext, bb, last_inst, reg_first_addr, SPILL_SLOT_2);
         dr_restore_reg(drcontext, bb, last_inst, reg_tmp, SPILL_SLOT_3);
 #endif
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_mbr, false, 2,
+        const auto clean_call_position =
+            make_opnd_unstolen(drcontext, bb, last_inst, &target_opnd);
+        dr_insert_clean_call(drcontext, bb, clean_call_position, (void *) at_mbr, false, 2,
                              OPND_CREATE_INT(block_num),
                              target_opnd);
 #ifdef JUMP_MBR
@@ -1180,7 +1176,9 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         #elif defined(__aarch64__)
         #ifdef ADDR_CONV
         opnd_t targ = instr_get_target(last_inst);
-        dr_insert_clean_call(drcontext, bb, last_inst, (void *) at_return,
+        const auto clean_call_position =
+            make_opnd_unstolen(drcontext, bb, last_inst, &targ);
+        dr_insert_clean_call(drcontext, bb, clean_call_position, (void *) at_return,
                 false, 2, targ, opnd_create_reg(DR_REG_XSP));
         #else
         inlined_at_return_aarch64(drcontext, bb, last_inst);
@@ -1251,8 +1249,48 @@ static address app_pc_to_address(app_pc arg, bool allow_miss) {
     return address(mod->index, addr - mod->addr + mod->base);
 }
 
+static reg_id_t allocate_temporary_reg(instr_t *instr, const reg_id_t after) {
+#if defined(__x86_64__)
+    const reg_id_t min = DR_REG_RAX+1;
+    const reg_id_t max = DR_REG_R15;
+#elif defined(__aarch64__)
+    const reg_id_t min = DR_REG_X0+1;
+    const reg_id_t max = DR_REG_X30;
+#endif
+    reg_id_t result;
+
+    for (result = (min > after ? min : after+1); result <= max; result++) {
+        if (reg_is_stolen(result)) continue;
+        if (!instr_uses_reg(instr, result)) break;
+    }
+    if (result > max) {
+        address key(app_pc_to_address(instr_get_app_pc(instr), true));
+        PRINTF_STDERR("Error: couldn't allocate temporary register at %s+0x%x\n", modules.at(key.first).path.c_str(), key.second);
+        dr_abort_with_code(1);
+    }
+    return result;
+}
+static instr_t *make_opnd_unstolen(
+        void *const drcontext, instrlist_t *const bb,
+        instr_t *const instr, opnd_t *const opnd) {
+    if (!opnd_uses_reg(*opnd, dr_get_stolen_reg())) return instr;
+    const reg_id_t reg_tmp = allocate_temporary_reg(instr);
+    if (!opnd_replace_reg_resize(opnd, dr_get_stolen_reg(), reg_tmp)) {
+        address key(app_pc_to_address(instr_get_app_pc(instr), true));
+        PRINTF_STDERR("Error: failed to replace stolen reg at %s+0x%x\n", modules.at(key.first).path.c_str(), key.second);
+        dr_abort_with_code(1);
+    }
+
+    dr_save_reg(drcontext, bb, instr, reg_tmp, SPILL_SLOT_1);
+    dr_insert_get_stolen_reg_value(drcontext, bb, instr, reg_tmp);
+    // caller's operations go here.
+    dr_restore_reg(drcontext, bb, instr, reg_tmp, SPILL_SLOT_1);
+    return instr_get_prev(instr);
+}
+
 static void do_return() {
     const stack_entry &last_caller = call_stack[stack_index];
+    if (stack_index < 0) return;
     stack_index--;
     bool found = false;
     for (int64_t i = 0; i <= stack_index; ++i) {
