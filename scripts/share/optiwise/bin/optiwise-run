@@ -114,22 +114,22 @@ fi
 
 if [ -z "${skip_check-}" ]; then
   if [ "${flag_verbose-}" ]; then
-    echo "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@"
+    echo "$share_bin_dir/optiwise-check" "--result-dir=$result_dir" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@"
   fi
 
-  "$share_bin_dir/optiwise-check" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@" || exit $?
+  "$share_bin_dir/optiwise-check" "--result-dir=$result_dir" ${flag_verbose-} ${objdump-} ${perf_event-} ${flag_gui-} -- "$@" || exit $?
 fi
 
 if [ -z "${skip_sample-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-sample" \
-      ${flag_verbose-} --name="$name" \
+      "--result-dir=$result_dir" ${flag_verbose-} --name="$name" \
       ${frequency-} ${perf_event-} ${stdin-} ${stdout-} ${stderr-} \
       -- "$@"
   fi
 
   "$share_bin_dir/optiwise-sample" \
-    ${flag_verbose-} --name="$name" \
+    "--result-dir=$result_dir" ${flag_verbose-} --name="$name" \
     ${frequency-} ${perf_event-} ${stdin-} ${stdout-} ${stderr-} \
     -- "$@" || exit $?
 fi
@@ -137,23 +137,23 @@ fi
 if [ -z "${skip_disassemble-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-disassemble" \
-      ${flag_verbose-} ${objdump-} --name="$name"
+      "--result-dir=$result_dir" ${flag_verbose-} ${objdump-} --name="$name"
   fi
 
   "$share_bin_dir/optiwise-disassemble" \
-    ${flag_verbose-} ${objdump-} --name="$name" || exit $?
+    "--result-dir=$result_dir" ${flag_verbose-} ${objdump-} --name="$name" || exit $?
 fi
 
 if [ -z "${skip_count-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-count" \
-      ${flag_verbose-} --name="$name" \
+      "--result-dir=$result_dir" ${flag_verbose-} --name="$name" \
       ${stdin-} ${stdout-} ${stderr-} \
       -- "$@"
   fi
 
   "$share_bin_dir/optiwise-count" \
-    ${flag_verbose-} --name="$name" \
+    "--result-dir=$result_dir" ${flag_verbose-} --name="$name" \
     ${stdin-} ${stdout-} ${stderr-} \
     -- "$@" || exit $?
 fi
@@ -161,19 +161,19 @@ fi
 if [ -z "${skip_analyze-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-analyze" \
-      ${flag_verbose-} --name="$name"
+      "--result-dir=$result_dir" ${flag_verbose-} --name="$name"
   fi
 
   "$share_bin_dir/optiwise-analyze" \
-    ${flag_verbose-} --name="$name"
+    "--result-dir=$result_dir" ${flag_verbose-} --name="$name"
 fi
 
 if [ "${flag_gui-}" ] && [ -z "${skip_gui-}" ]; then
   if [ "${flag_verbose-}" ]; then
     echo "$share_bin_dir/optiwise-gui" \
-      ${flag_verbose-} --name="$name"
+      "--result-dir=$result_dir" ${flag_verbose-} --name="$name"
   fi
 
   exec "$share_bin_dir/optiwise-gui" \
-    ${flag_verbose-} --name="$name"
+    "--result-dir=$result_dir" ${flag_verbose-} --name="$name"
 fi
