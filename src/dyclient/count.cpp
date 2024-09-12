@@ -178,6 +178,7 @@ static void clean_call(uint block_size, app_pc start_pc, app_pc end_pc, int opco
 static void event_module_load(void *drcontext, const module_data_t *info, bool loaded);
 static void event_module_unload(void *drcontext, const module_data_t *info);
 static void at_mbr(uint64_t src, app_pc targ);
+static uint64_t app_pc_to_offset(app_pc arg, const app_module &mod);
 static address app_pc_to_address(app_pc arg, bool allow_miss=false);
 
 static reg_id_t allocate_temporary_reg(instr_t *instr, const reg_id_t after=DR_REG_NULL);
@@ -798,7 +799,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     if (cfg_block.count(key) == 0) { // inst not exist
         cfg_node tmp = {.count = 0,
                         .star_addr = key,
-                        .end_addr = (uint64_t) addr_l - mod.addr,
+                        .end_addr = app_pc_to_offset(addr_l, mod),
                         .inst_name = decode_opcode_name(opcode),
                         #ifdef __x86_64__
                         .inst_length = cfg_table[block_num].inst_length,
@@ -808,11 +809,11 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
         cfg_block[key] = tmp;
     } else {
         if (for_trace &&
-            (cfg_block[key].end_addr != (uint64_t) addr_l - mod.addr ||
+            (cfg_block[key].end_addr != app_pc_to_offset(addr_l, mod) ||
              cfg_block[key].block_size != num_instructions))
         {
             PRINTF_STDOUT("statr %ld %lx %ld %lx\n", cfg_block[key].star_addr.first,cfg_block[key].star_addr.second, key.first, key.second);
-            PRINTF_STDOUT("end %lx %lx\n", cfg_block[key].end_addr, (uint64_t) addr_l - mod.addr);
+            PRINTF_STDOUT("end %lx %lx\n", cfg_block[key].end_addr, app_pc_to_offset(addr_l, mod));
             PRINTF_STDOUT("size %ld %d\n", cfg_block[key].block_size, num_instructions);
             PRINTF_STDOUT("name %s %s\n", cfg_block[key].inst_name, decode_opcode_name(opcode));
         }
@@ -820,7 +821,7 @@ static dr_emit_flags_t event_basic_block(void *drcontext, void *tag, instrlist_t
     #endif
 
     cfg_table[block_num].star_addr = key;
-    cfg_table[block_num].end_addr = (uint64_t) addr_l - mod.addr;
+    cfg_table[block_num].end_addr = app_pc_to_offset(addr_l, mod);
     cfg_table[block_num].inst_name = decode_opcode_name(opcode);
     cfg_table[block_num].block_size = num_instructions;
     cfg_table[block_num].count = 0;
@@ -1231,22 +1232,24 @@ static void event_module_unload(void *drcontext, const module_data_t *info) {
     PRINT_STDERR("Warning: non-existent module unloaded?\n");
 }
 
+static uint64_t app_pc_to_offset(app_pc arg, const app_module &mod) {
+    return uint64_t(arg) - mod.addr + mod.base;
+}
+
 static address app_pc_to_address(app_pc arg, bool allow_miss) {
     uint64_t addr = (uint64_t)arg;
-    const app_module *mod = nullptr;
+    unsigned mod_i = 0;
     for (auto i: loaded_modules) {
-        const app_module *m = &modules[i];
-        if (m->addr <= addr && m->end_addr > addr) {
-            mod = m;
+        const app_module &m = modules[i];
+        if (m.addr <= addr && m.end_addr > addr) {
+            mod_i = i;
             break;
         }
     }
-    if (!mod) {
-        if (!allow_miss)
-            PRINTF_STDERR("Error: no known module loaded @ %p\n", arg);
-        mod = &modules[0];
-    }
-    return address(mod->index, addr - mod->addr + mod->base);
+    if (!allow_miss && mod_i == 0)
+        PRINTF_STDERR("Error: no known module loaded @ %p\n", arg);
+    const app_module &mod = modules[mod_i];
+    return address(mod.index, app_pc_to_offset(arg, mod));
 }
 
 static reg_id_t allocate_temporary_reg(instr_t *instr, const reg_id_t after) {
