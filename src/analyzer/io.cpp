@@ -77,7 +77,7 @@ app_module_id module_add_or_find(const string &path, module_add_or_find_role rol
     for (auto &m: modules) {
         id++;
         bool approx_match = false;
-        for (const auto p: m.paths) {
+        for (const auto &p: m.paths) {
             if (p != path) {
                 size_t p_filename = path_filename_part(p);
                 approx_match = approx_match || std::equal(
@@ -316,6 +316,8 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
         const uint64_t mmap_offset = offset;
         const app_module_id id(module_add_or_find(path, module_add_or_find_role::sample));
         const app_module &mod = module_lookup(id);
+        if (mod.disassemble_error)
+            throw *mod.disassemble_error;
         // find a program header line that this mapping covers entirely.
         auto offs = mod.file_offset_to_vaddr.upper_bound(mmap_offset);
         if (offs != mod.file_offset_to_vaddr.begin()) offs--;
@@ -365,7 +367,10 @@ void inputEvent(const string &filename, ifstream &fp, vector<Perf_result> &perf,
                 id = m.id;
                 sample_address -= m.addr;
                 sample_address += m.offset;
-                module_lookup(id).have_sample = true;
+                auto &mod = module_lookup(id);
+                mod.have_sample = true;
+                if (mod.disassemble_error)
+                    throw *mod.disassemble_error;
                 break;
             }
         }
@@ -755,6 +760,7 @@ void read_disassembly(string filename, objdump_table& objdump_result){
     app_module_id current_module(-1);
     enum class parser_state {
         none,
+        recovery,
         in_file,
         in_symbol_table,
         in_symbol_table_dynamic,
@@ -778,6 +784,8 @@ void read_disassembly(string filename, objdump_table& objdump_result){
             current_symtab = &empty_symtab;
             state = parser_state::in_file;
             continue;
+        } else if (state == parser_state::recovery) {
+            continue;
         } else if (asm_line.substr(0, 15) == "Program Header:") {
             state = parser_state::in_program_header;
             continue;
@@ -798,28 +806,44 @@ void read_disassembly(string filename, objdump_table& objdump_result){
             continue;
         }
 
-        switch (state) {
-        case parser_state::none: break;
-        case parser_state::in_file: break;
-        case parser_state::in_program_header:
-            parse_program_header_line(
-                    filename, lineno, asm_line, current_module,
-                    ph_last_load, ph_off, ph_vaddr
-            );
-            break;
-        case parser_state::in_disassembly:
-            parse_disassembly_line(
-                    filename, lineno, asm_line, objdump_result, current_module,
-                    *current_symtab, inlined_func_name, source
-            );
-            break;
-        case parser_state::in_symbol_table:
-        case parser_state::in_symbol_table_dynamic:
-            parse_symbol_line(
-                    filename, lineno, asm_line, current_module, symbol_table,
-                    state == parser_state::in_symbol_table_dynamic
-            );
-            break;
+        try {
+            switch (state) {
+            case parser_state::none: break;
+            case parser_state::recovery: break;
+            case parser_state::in_file: break;
+            case parser_state::in_program_header:
+                parse_program_header_line(
+                        filename, lineno, asm_line, current_module,
+                        ph_last_load, ph_off, ph_vaddr
+                );
+                break;
+            case parser_state::in_disassembly:
+                parse_disassembly_line(
+                        filename, lineno, asm_line, objdump_result, current_module,
+                        *current_symtab, inlined_func_name, source
+                );
+                break;
+            case parser_state::in_symbol_table:
+            case parser_state::in_symbol_table_dynamic:
+                parse_symbol_line(
+                        filename, lineno, asm_line, current_module, symbol_table,
+                        state == parser_state::in_symbol_table_dynamic
+                );
+                break;
+            }
+        } catch (parse_error &pe) {
+            if (current_module != app_module_id(-1)) {
+                const auto first_instr = objdump_result.lower_bound(address(current_module, 0));
+                const auto past_last_instr = objdump_result.lower_bound(address(current_module+1, 0));
+                if (first_instr != past_last_instr)
+                    objdump_result.erase(first_instr, past_last_instr);
+
+                auto &mod = module_lookup(current_module);
+                mod.disassemble_error.reset(new parse_error(std::move(pe)));
+                mod.have_disassemble = false;
+            }
+            state = parser_state::recovery;
+            current_module = app_module_id(-1);
         }
     } // end while
     asm_code.close();
@@ -911,7 +935,7 @@ void read_cfg(
         x86_64,
         aarch64,
     } arch = arch::none;
-    cfg_node *current_node;
+    cfg_node *current_node = nullptr;
     map<app_module_id, string> module_paths;
     bool entry_found(false);
     unsigned int last_instruction_end = 0;
@@ -1005,8 +1029,11 @@ void read_cfg(
         app_module_id index = m.first;
         const string &path = m.second;
 
-        module_map[index] = module_add_or_find(path,
+        app_module_id analyzer_index = module_add_or_find(path,
                 module_add_or_find_role::count);
+        module_map[index] = analyzer_index;
+        if (module_lookup(analyzer_index).disassemble_error)
+            throw *module_lookup(analyzer_index).disassemble_error;
     }
 
     // convert from cfg file module numbering to this session's numbering
