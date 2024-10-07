@@ -15,12 +15,15 @@
 
 using namespace std;
 
+class parse_error;
+
 struct app_module {
     set<string> paths;
     map<uint64_t, pair<uint64_t, uint64_t>> file_offset_to_vaddr;
     bool have_disassemble = false;
     bool have_count = false;
     bool have_sample = false;
+    std::unique_ptr<parse_error> disassemble_error = nullptr;
     uint64_t samples = 0;
     uint64_t counts = 0;
 
@@ -164,5 +167,8 @@ typedef map<string, map<int, pair<string, bool>>> source_table;
 typedef map<address, shared_ptr<function>> func_table;
 typedef map<address, sample_point> func_sample;
 typedef map<address, cfg_node> dycfg;
+
+/* for parse_error */
+#include "io.hpp"
 
 #endif
