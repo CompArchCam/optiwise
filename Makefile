@@ -7,7 +7,7 @@
 ARCH ?= $(shell $(CXX) -dumpmachine | sed -e 's/^\([^-]*\).*/\1/')
 BUILD_DIR ?= build.$(ARCH)
 INSTALL_DIR ?= install_dir.$(ARCH)
-DYNAMORIO_VERSION ?= 10.0.0
+DYNAMORIO_VERSION ?= 11.3.0-1
 
 ifeq ($(ARCH),aarch64)
   DYNAMORIO_PREFIX ?= AArch64-Linux
@@ -21,7 +21,8 @@ endif
 
 # Name for the directory (not a path)
 DYNAMORIO_DIRNAME ?= DynamoRIO-$(DYNAMORIO_PREFIX)-$(DYNAMORIO_VERSION)
-DYNAMORIO_URL ?= https://github.com/DynamoRIO/dynamorio/releases/download/release_$(DYNAMORIO_VERSION)/$(DYNAMORIO_DIRNAME).tar.gz
+DYNAMORIO_TARNAME ?= DynamoRIO-$(DYNAMORIO_PREFIX)-$(firstword $(subst -, ,$(DYNAMORIO_VERSION))).tar.gz
+DYNAMORIO_URL ?= https://github.com/DynamoRIO/dynamorio/releases/download/release_$(DYNAMORIO_VERSION)/$(DYNAMORIO_TARNAME)
 
 ###############################################################################
 # Meta rules
