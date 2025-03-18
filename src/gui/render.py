@@ -882,6 +882,6 @@ class Renderer:
 
     def function_filename(self, function):
         if function.do_render:
-            return safePath(function.name) + ".html"
+            return "fun-" + safePath(function.name) + ".html"
         else: return None
 

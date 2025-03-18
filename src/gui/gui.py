@@ -14,9 +14,22 @@ except ImportError as e:
 import processor
 import render
 
-path_count = sys.argv[1]
-path_analyze = sys.argv[2]
-path_gui = sys.argv[3]
+args = sys.argv[1:]
+
+render_all = False
+if len(args) > 0 and args[0] == "--render-all":
+    render_all = True
+    args = args[1:]
+
+
+if len(args) != 3:
+    print("Error: bad command line for python OptiWISE gui:  " + ' '.join(sys.argv), file=sys.stderr)
+    print(args, render_all)
+    sys.exit(1)
+
+path_count = args[0]
+path_analyze = args[1]
+path_gui = args[2]
 try:
     file_count = open(path_count)
     file_inst_csv = open(path_analyze + '/inst.csv')
@@ -47,7 +60,7 @@ def open_output(path):
         return None
 
 for function in p.functions.values():
-    function.do_render = function.samples_inc > 0
+    function.do_render = render_all or function.samples_inc > 0
 try:
     file_index = open_output('index.html')
     if file_index is not None:
