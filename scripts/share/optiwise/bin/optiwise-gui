@@ -5,6 +5,7 @@
 share_bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 share_dir="$(realpath "$share_bin_dir/..")"
 result_dir=optiwise_result
+render_all=
 
 while :; do
   case "${1-}" in
@@ -31,6 +32,7 @@ Options:
                recent).
   --name-count Name of the execution counting run to render (default: most
                recent).
+  --render-all Create web pages for all functions, not just those with samples.
 EOF
       exit 0
       ;;
@@ -46,6 +48,7 @@ EOF
     --name-analyze=*) name_analyze="${1#--*=}";;
     --name-count) shift; name_count="$1";;
     --name-count=*) name_count="${1#--*=}";;
+    --render-all) render_all="$1";;
     --) shift; break;;
     -?*)
       cat >&2 <<EOF
@@ -171,22 +174,22 @@ fi
 
 if [ ! "${flag_browser-}" ] && [ "${DISPLAY-}" ]; then
   if [ "${flag_verbose-}" ]; then
-    echo python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+    echo python3 $share_dir/lib/gui/gui.py $render_all "$result_dir/count/$name_count" \
       "$result_dir/analyze/$name_analyze" \
       "$result_dir/gui/$name_gui" \
     '&&' gnome-www-browser "$result_dir/gui/$name_gui/index.html"
   fi
-  python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+  python3 $share_dir/lib/gui/gui.py $render_all "$result_dir/count/$name_count" \
     "$result_dir/analyze/$name_analyze" \
     "$result_dir/gui/$name_gui" \
   && gnome-www-browser "$result_dir/gui/$name_gui/index.html"
 else
   if [ "${flag_verbose-}" ]; then
-    echo python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+    echo python3 $share_dir/lib/gui/gui.py $render_all "$result_dir/count/$name_count" \
       "$result_dir/analyze/$name_analyze" \
       "$result_dir/gui/$name_gui"
   fi
-  exec python3 $share_dir/lib/gui/gui.py "$result_dir/count/$name_count" \
+  exec python3 $share_dir/lib/gui/gui.py $render_all "$result_dir/count/$name_count" \
     "$result_dir/analyze/$name_analyze" \
     "$result_dir/gui/$name_gui"
 fi
